@@ -174,39 +174,49 @@ def parse_cli() -> argparse.Namespace:
 
 
 # ───────────────────── Upgrade helper ─────────────────────
+# ───────────────────── Upgrade helper (FIX) ─────────────────────
 def perform_upgrade() -> None:
-    """Clona la última versión y reemplaza ~/.bin/ghconcat."""
+    """
+    Descarga la última versión desde GitHub y reemplaza ~/.bin/ghconcat.
+    Funciona con cualquier estructura de carpetas en el repositorio.
+    """
+    import shutil
+    import stat
+    import subprocess
+    import tempfile
     from pathlib import Path
-    import shutil, subprocess, tempfile, stat, sys, os, glob
 
-    tmp = Path(tempfile.mkdtemp(prefix="ghconcat_up_"))
-    dest_dir = Path.home() / ".bin"
-    dest = dest_dir / "ghconcat"
+    TMP_DIR = Path(tempfile.mkdtemp(prefix="ghconcat_up_"))
+    DEST_DIR = Path.home() / ".bin"
+    DEST_FILE = DEST_DIR / "ghconcat"
+    REPO_URL = "git@github.com:GAHEOS/ghconcat.git"   # cámbiala a HTTPS si lo prefieres
 
     try:
-        url = "git@github.com:GAHEOS/ghconcat"
-        print(f"Clonando {url} …")
-        subprocess.check_call(["git", "clone", "--depth", "1", url, str(tmp)],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"Clonando {REPO_URL} …")
+        subprocess.check_call(
+            ["git", "clone", "--depth", "1", REPO_URL, str(TMP_DIR)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
-        # Busca el script en cualquier subdirectorio
-        matches = list(tmp.glob("**/ghconcat.py"))
+        matches = list(TMP_DIR.glob("**/ghconcat.py"))
         if not matches:
-            _fatal("No se encontró ghconcat.py en el repositorio clonado.")
-        src = matches[0]  # usa el primero
+            _fatal("No se encontró ningún ghconcat.py en el repositorio clonado.")
 
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-        dest.chmod(dest.stat().st_mode | stat.S_IXUSR)
+        src = matches[0]                # usa el primero que aparezca
+        DEST_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, DEST_FILE)
 
-        print(f"✔ ghconcat actualizado en {dest}")
-        print("Recuerda tener ~/.bin en tu PATH y OPENAI_API_KEY configurada.")
-    except subprocess.CalledProcessError as exc:
-        _fatal(f"git clone falló: {exc}")
+        # Añadir bit de ejecución para usuario
+        DEST_FILE.chmod(DEST_FILE.stat().st_mode | stat.S_IXUSR)
+
+        print(f"✔ ghconcat actualizado correctamente en {DEST_FILE}")
+        print("⚠ Recuerda tener ~/.bin en tu PATH y la variable OPENAI_API_KEY definida.")
+    except subprocess.CalledProcessError:
+        _fatal("git clone falló (¿URL incorrecta o acceso denegado?).")
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(TMP_DIR, ignore_errors=True)
     sys.exit(0)
-
 
 # ───────────────────── Extension management ─────────────────────
 def active_extensions(ns: argparse.Namespace) -> Set[str]:
