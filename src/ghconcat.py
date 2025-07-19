@@ -38,7 +38,7 @@ from typing import Iterable, List, Sequence, Set
 # ─────────────────────── Config ────────────────────────
 HEADER_DELIM = "===== "
 DEFAULT_OUTPUT = "dump.txt"
-OPENAI_MODEL = "gpt-4o"
+OPENAI_MODEL = "o3"
 
 try:                                 # Import perezoso de OpenAI
     import openai
