@@ -315,7 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Internationalisation
     p.add_argument("-l", "--lang", dest="lang", default=DEFAULT_LANGUAGE,
-                   choices=["ES", "es", "Es", "eS", "EN", "en", "En", "eN"],
+                   choices=["ES", "EN"],
                    help="UI language for prompts and messages: ES (default) or EN.")
 
     # Help
