@@ -2,7 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+tests/test-fixtures
 # C extensions
 *.so
 
