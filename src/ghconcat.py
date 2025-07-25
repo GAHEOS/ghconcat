@@ -183,7 +183,7 @@ def _build_parser() -> argparse.ArgumentParser:
                    help=f"Escribe el dump en FILE (por defecto {DEFAULT_OUTPUT}).")
 
     # Languages
-    p.add_argument("-g", "--lang", required=True, action="append", metavar="LANG",
+    p.add_argument("-g", "--lang", action="append", metavar="LANG",
                    help="Lenguajes a incluir (alias 'odoo'; repetible o CSV).")
     p.add_argument("-G", "--skip-lang", action="append", dest="skip_langs", metavar="LANG",
                    help="Lenguajes a excluir del set activo.")
