@@ -1,0 +1,4 @@
+-a src/module/charlie.js
+-g js
+-n 1
+-N 2

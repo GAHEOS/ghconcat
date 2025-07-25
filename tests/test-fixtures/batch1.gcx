@@ -1,0 +1,5 @@
+-w ws1
+-a src/other
+-g py
+-n 1
+-N 3

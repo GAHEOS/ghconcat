@@ -1,0 +1,4 @@
+-w ws2
+-r src
+-a module/echo.dart
+-g dart
