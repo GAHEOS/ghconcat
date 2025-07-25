@@ -8,21 +8,16 @@ and orchestration via directive batches.
 
 Highlights
 ----------
-• **Default run** concatenates *.py*, *.xml*, *.js* and *.csv* files
-  (see ``DEFAULT_EXTENSIONS``).
-• Batch files provided with **-X** may contain several paths on the same
-  line and inherit / add / exclude flags from the upper level according
-  to the guideline rules.
-• -x FILE        Inline directives (expanded before parsing)
-• -X FILE        **Batch** directives → independent job, then **merge**
-• -r DIR         Base directory for relative routes
-• -k EXT         Adds extra extensions (cumulative)
-• -n/-N/-H       Line‑range controls
-• --ia-*         Sends the consolidated dump to ChatGPT
-• --upgrade      Auto‑upgrade from GitHub
-• -l/--lang      UI language: ES (default) or EN
-
-Run ``ghconcat -h`` for the full CLI reference.
+• **Batch directives** (`-X FILE`) may now declare variables with
+  ``--ia-set=<var_name>`` (without value).
+  The *dump* produced by that batch becomes available as ``{<var_name>}``
+  inside the main ``--ia-prompt`` template.
+• These variables do **not** modify *dump.txt* (it still contains the full
+  concatenation); they only affect prompt interpolation.
+• ``--ia-prompt=my.md`` creates **my.input.md** with every `{placeholder}`
+  replaced. The prompt is *not* sent to OpenAI unless ``--ia-output`` is
+  provided. ``--ia-model`` lets you change the model (default *o3*).
+• All other features remain unchanged (see ``ghconcat -h``).
 
 Error handling
 --------------
@@ -44,69 +39,39 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Iterable, List, Sequence, Set, Tuple, Optional
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 # ─────────────────────── Config ────────────────────────
 HEADER_DELIM = "===== "
 DEFAULT_OUTPUT = "dump.txt"
-OPENAI_MODEL = "o3"
+DEFAULT_OPENAI_MODEL = "o3"
 DEFAULT_LANGUAGE = "ES"
 
 try:                                 # Lazy OpenAI import
     import openai
     from openai import OpenAIError
 except ModuleNotFoundError:          # pragma: no cover
-    openai = None                    # A warning will be raised when AI is used
+    openai = None                    # a stub will be used if the SDK is missing
     class OpenAIError(Exception):    # type: ignore
-        """Stub exception raised when the OpenAI SDK is missing."""
+        """Raised when OpenAI SDK is unavailable."""
         pass
 
 
 # ========== CONTROLLED OUTPUT UTILS ==========
 def _fatal(msg: str, code: int = 1) -> None:
-    """
-    Print *msg* to **STDERR** and exit gracefully without a traceback.
-
-    Parameters
-    ----------
-    msg:
-        Human‑readable error message.
-    code:
-        Exit status to be returned to the shell (default ``1``).
-    """
+    """Print *msg* to **STDERR** and exit gracefully (no traceback)."""
     print(msg, file=sys.stderr)
     sys.exit(code)
 
 
 def _debug_enabled() -> bool:
-    """
-    Detect whether the application is running in debug mode.
-
-    Returns
-    -------
-    bool
-        ``True`` when the environment variable ``DEBUG`` is exactly ``"1"``.
-    """
+    """Return ``True`` when ``DEBUG=1`` is set in the environment."""
     return os.getenv("DEBUG") == "1"
 
 
 # ───────────────────── Directive expansion ─────────────────────
 def _is_within(path: Path, parent: Path) -> bool:
-    """
-    Check whether *path* belongs to the *parent* subtree.
-
-    Parameters
-    ----------
-    path:
-        Candidate child path.
-    parent:
-        Directory that may contain *path*.
-
-    Returns
-    -------
-    bool
-        ``True`` if *parent* is an ancestor of *path*.
-    """
+    """Return ``True`` if *parent* is an ancestor of *path*."""
     try:
         path.relative_to(parent)
         return True
@@ -115,49 +80,25 @@ def _is_within(path: Path, parent: Path) -> bool:
 
 
 def _parse_directive_file(path: Path) -> List[str]:
-    """
-    Parse a batch directive file and convert its contents into CLI tokens.
-
-    Parsing rules
-    -------------
-    * Comment lines starting with ``#`` or containing ``//`` are ignored.
-    * Each word that does **not** begin with a flag is treated as a route and
-      expanded as ``"-a", <route>``.
-    * Lines that begin with a flag keep that flag. When the flag is ``-a`` and
-      more than one argument is provided, every extra value is expanded into an
-      independent ``"-a"`` pair so the standard parser can handle them later.
-
-    Parameters
-    ----------
-    path:
-        Absolute path of the directive file.
-
-    Returns
-    -------
-    list[str]
-        A flattened list of tokens suitable for ``argparse``.
-    """
+    """Convert a batch file (*path*) into an ``argparse``‑ready token list."""
     tokens: List[str] = []
     with path.open("r", encoding="utf-8") as f:
         for raw in f:
             stripped = raw.split("//", 1)[0].strip()
             if not stripped or stripped.startswith("#"):
                 continue
-
             parts = shlex.split(stripped)
             if not parts:
                 continue
-
-            # Line begins with a flag
+            # Leading flag
             if parts[0].startswith("-"):
                 flag = parts[0]
-                # Expand “-a route1 route2 …”
-                if flag == "-a" and len(parts) > 2:
+                if flag == "-a" and len(parts) > 2:      # expand “-a f1 f2 …”
                     for route in parts[1:]:
                         tokens.extend(["-a", route])
                 else:
                     tokens.extend(parts)
-            # Line without flag → treat every word as a route
+            # No flag → every word is a route (-a)
             else:
                 for route in parts:
                     tokens.extend(["-a", route])
@@ -165,25 +106,7 @@ def _parse_directive_file(path: Path) -> List[str]:
 
 
 def expand_directives(argv: Sequence[str]) -> List[str]:
-    """
-    Expand inline ``-x FILE`` tokens.
-
-    Notes
-    -----
-    * ``-X FILE`` tokens are intentionally **preserved** so that the orchestrator
-      can process them at a later stage.
-    * Expansion is performed before ``argparse`` consumes the arguments.
-
-    Parameters
-    ----------
-    argv:
-        Raw command‑line arguments excluding ``sys.argv[0]``.
-
-    Returns
-    -------
-    list[str]
-        The argument vector with ``-x`` references expanded.
-    """
+    """Inline‑expand ``-x FILE`` tokens before ``argparse`` processing."""
     out: List[str] = []
     it = iter(argv)
     for token in it:
@@ -202,25 +125,7 @@ def expand_directives(argv: Sequence[str]) -> List[str]:
 
 # ─────────────────────── CLI parsing ───────────────────────
 def build_parser() -> argparse.ArgumentParser:
-    """
-    Create and configure the top-level command-line parser for **ghconcat**.
-
-    The parser organises options into thematic groups:
-
-    * **Pre-processing**   – directive files expansion and batch orchestration
-    * **Filters**          – roots selection, path exclusion and suffix rules
-    * **Slicing**          – line-range extraction and header preservation
-    * **Behaviour**        – content clean-up toggles and route-only mode
-    * **Extension set**    – inclusion/exclusion of file types
-    * **AI integration**   – prompt/output files for ChatGPT interaction
-    * **Maintenance**      – self-upgrade from GitHub and localisation
-    * **Help**             – standard usage information
-
-    Returns
-    -------
-    argparse.ArgumentParser
-        Fully initialised parser ready to consume user input.
-    """
+    """Return the top‑level CLI parser for **ghconcat**."""
     p = argparse.ArgumentParser(
         prog="ghconcat",
         add_help=False,
@@ -229,15 +134,15 @@ def build_parser() -> argparse.ArgumentParser:
             "[-r DIR] [-k EXT] [-l LANG] "
             "[-n NUM] [-N END] [-H] "
             "[--odoo] [--upgrade] "
-            "[--ia-prompt FILE --ia-output FILE]"
+            "[--ia-prompt FILE [--ia-output FILE] [--ia-model MODEL]]"
         ),
     )
 
-    # Pre-processing
+    # Pre‑processing
     p.add_argument("-x", dest="directives", action="append", metavar="FILE",
-                   help="Load additional CLI flags from FILE and process them first.")
+                   help="Inline: load CLI flags from FILE first.")
     p.add_argument("-X", dest="batch_directives", action="append", metavar="FILE",
-                   help="Execute an independent batch defined in FILE and merge its output.")
+                   help="Execute independent batch defined in FILE and merge output.")
 
     # General filters
     p.add_argument("-a", dest="roots", action="append", metavar="PATH",
@@ -247,55 +152,55 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-e", dest="exclude", action="append", metavar="PAT",
                    help="Skip any path that contains PAT.")
     p.add_argument("-E", dest="exclude_dir", action="append", metavar="DIR",
-                   help="Recursively exclude DIR and all its sub-directories.")
+                   help="Recursively exclude DIR and its sub‑directories.")
     p.add_argument("-p", dest="suffix", action="append", metavar="SUF",
-                   help="Restrict the selection to files whose name ends with SUF.")
+                   help="Restrict to files whose name ends with SUF.")
     p.add_argument("-k", dest="add_ext", action="append", metavar="EXT",
-                   help="Register an extra extension (include the dot, e.g. .txt).")
+                   help="Add extra extension (include the dot, e.g. .txt).")
     p.add_argument("-f", dest="output", default=DEFAULT_OUTPUT, metavar="FILE",
-                   help=f"Write the final dump to FILE (default: {DEFAULT_OUTPUT}).")
+                   help=f"Write final dump to FILE (default: {DEFAULT_OUTPUT}).")
 
-    # Line-range flags
+    # Line‑range
     p.add_argument("-n", dest="range_start_or_len", type=int, metavar="NUM",
-                   help="Alone: keep the first NUM lines; with -N, NUM is the 1-based start line.")
+                   help="Alone: keep first NUM lines; with -N, 1‑based start line.")
     p.add_argument("-N", dest="range_end", type=int, metavar="END",
-                   help="1-based end line (inclusive). Requires -n.")
+                   help="1‑based inclusive end line (requires -n).")
     p.add_argument("-H", dest="keep_header", action="store_true",
-                   help="Preserve the first non-blank line (header) even if it falls outside the slice.")
+                   help="Preserve first non‑blank line even if sliced out.")
 
-    # Behaviour switches
+    # Behaviour
     p.add_argument("-t", dest="route_only", action="store_true",
-                   help="Print matching routes only; do not concatenate file contents.")
+                   help="Print matching routes only (no concatenation).")
     p.add_argument("-c", dest="rm_simple", action="store_true",
-                   help="Strip single-line comments.")
+                   help="Strip single‑line comments.")
     p.add_argument("-C", dest="rm_all", action="store_true",
-                   help="Strip all comments, including multi-line doc comments.")
+                   help="Strip *all* comments (incl. docblocks).")
     p.add_argument("-S", dest="keep_blank", action="store_true",
-                   help="Preserve blank lines in the output.")
+                   help="Preserve blank lines.")
     p.add_argument("-i", dest="rm_import", action="store_true",
                    help="Remove import statements.")
     p.add_argument("-I", dest="rm_export", action="store_true",
                    help="Remove export statements.")
 
-    # Inclusion flags
+    # Inclusion
     p.add_argument("--odoo", dest="alias_odoo", action="store_true",
                    help="Shortcut for --py --xml --js --csv.")
     p.add_argument("--py", dest="inc_py", action="store_true",
-                   help="Include Python files (*.py).")
+                   help="Include Python files.")
     p.add_argument("--dart", dest="inc_dart", action="store_true",
-                   help="Include Dart files (*.dart).")
+                   help="Include Dart files.")
     p.add_argument("--xml", dest="inc_xml", action="store_true",
-                   help="Include XML files (*.xml).")
+                   help="Include XML files.")
     p.add_argument("--csv", dest="inc_csv", action="store_true",
-                   help="Include CSV files (*.csv).")
+                   help="Include CSV files.")
     p.add_argument("--js", dest="inc_js", action="store_true",
-                   help="Include JavaScript files (*.js).")
+                   help="Include JavaScript files.")
     p.add_argument("--yml", dest="inc_yml", action="store_true",
-                   help="Include YAML files (*.yml, *.yaml).")
+                   help="Include YAML files.")
 
-    # Exclusion flags
+    # Exclusion
     p.add_argument("--no-py", dest="no_py", action="store_true",
-                   help="Exclude Python files even if previously included.")
+                   help="Exclude Python files.")
     p.add_argument("--no-xml", dest="no_xml", action="store_true",
                    help="Exclude XML files.")
     p.add_argument("--no-js", dest="no_js", action="store_true",
@@ -305,18 +210,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     # AI integration
     p.add_argument("--ia-prompt", dest="ia_prompt", metavar="FILE",
-                   help="Template containing the message to send to ChatGPT (must include {dump_data}).")
+                   help="Prompt template (placeholders: {dump_data} + each --ia-set).")
     p.add_argument("--ia-output", dest="ia_output", metavar="FILE",
-                   help="File where ChatGPT's reply will be saved.")
+                   help="Where to store ChatGPT reply. If omitted, no call is made.")
+    p.add_argument("--ia-model", dest="ia_model", default=DEFAULT_OPENAI_MODEL, metavar="MODEL",
+                   help=f"OpenAI model (default: {DEFAULT_OPENAI_MODEL}).")
+    p.add_argument("--ia-set", dest="ia_set", action="append", metavar="VAR[=VAL]",
+                   help="**For batch files only**: expose dump (or VAL) as {VAR}.")  # ← NEW: flagged as batch‑only
 
     # Maintenance
     p.add_argument("--upgrade", dest="upgrade", action="store_true",
-                   help="Fetch the latest version from GitHub and replace the local ghconcat.")
+                   help="Self‑upgrade from GitHub.")
 
-    # Internationalisation
+    # I18N
     p.add_argument("-l", "--lang", dest="lang", default=DEFAULT_LANGUAGE,
                    choices=["ES", "EN"],
-                   help="UI language for prompts and messages: ES (default) or EN.")
+                   help="UI language: ES (default) or EN.")
 
     # Help
     p.add_argument("-h", "--help", action="help")
@@ -324,14 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_cli() -> argparse.Namespace:
-    """
-    Parse ``sys.argv`` after expanding inline directive files.
-
-    Returns
-    -------
-    argparse.Namespace
-        Fully populated namespace.
-    """
+    """Parse CLI after inline expansion."""
     argv = expand_directives(sys.argv[1:])
     ns = build_parser().parse_args(argv)
     ns.lang = ns.lang.upper()
@@ -343,135 +245,77 @@ def parse_cli() -> argparse.Namespace:
 # ───────────────────── Helpers for inheritance ─────────────────────
 def _inherit_lists(parent: Optional[List[str]],
                    child: Optional[List[str]]) -> Optional[List[str]]:
-    """
-    Merge two optional lists according to inheritance rules.
-
-    Returns
-    -------
-    list[str] | None
-        The merged list, or ``None`` when empty.
-    """
+    """Return combined list or ``None``."""
     merged = (parent or []) + (child or [])
     return merged or None
 
 
 def inherit_flags(parent: argparse.Namespace, child: argparse.Namespace) -> None:
-    """
-    Propagate N‑1 flags into N‑2 according to the guideline rules.
-
-    Parameters
-    ----------
-    parent:
-        Namespace from the upper‑level invocation.
-    child:
-        Namespace corresponding to the sub‑invocation (modified in place).
-    """
-    # ---- cumulative list flags
+    """Propagate N‑1 flags into N‑2 according to guideline rules."""
     for attr in ("exclude", "exclude_dir", "suffix", "add_ext"):
         setattr(child, attr, _inherit_lists(getattr(parent, attr, None),
                                            getattr(child, attr, None)))
-
-    # ---- boolean flags (OR logic)
-    bool_attrs = (
-        # inclusion / exclusion
+    bools = (
         "alias_odoo", "inc_py", "inc_dart", "inc_xml", "inc_csv", "inc_js",
         "inc_yml", "no_py", "no_xml", "no_js", "no_csv",
-        # behaviour switches
         "rm_simple", "rm_all", "keep_blank", "rm_import", "rm_export",
         "route_only", "keep_header"
     )
-    for attr in bool_attrs:
+    for attr in bools:
         setattr(child, attr, getattr(parent, attr) or getattr(child, attr))
-
-    # ---- range defaults (inherit if child left None)
     if child.range_start_or_len is None:
         child.range_start_or_len = parent.range_start_or_len
     if child.range_end is None:
         child.range_end = parent.range_end
-    # (‑H already OR‑merged)
 
 
 # ───────────────────── Upgrade helper ─────────────────────
 def perform_upgrade() -> None:
-    """
-    Download the latest version of *ghconcat* from GitHub and replace the copy
-    located in ``~/.bin``.
-
-    The operation is performed in a temporary directory and works regardless
-    of the repository folder structure.
-    """
+    """Pull latest version from GitHub and replace local copy."""
     import stat
 
-    TMP_DIR = Path(tempfile.mkdtemp(prefix="ghconcat_up_"))
-    DEST_DIR = Path.home() / ".bin"
-    DEST_FILE = DEST_DIR / "ghconcat"
-    REPO_URL = "git@github.com:GAHEOS/ghconcat.git"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ghconcat_up_"))
+    dest_dir = Path.home() / ".bin"
+    dest_file = dest_dir / "ghconcat"
+    repo_url = "git@github.com:GAHEOS/ghconcat.git"
 
     try:
-        print(f"Cloning {REPO_URL} …")
+        print(f"Cloning {repo_url} …")
         subprocess.check_call(
-            ["git", "clone", "--depth", "1", REPO_URL, str(TMP_DIR)],
+            ["git", "clone", "--depth", "1", repo_url, str(tmp_dir)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
-        matches = list(TMP_DIR.glob("**/ghconcat.py"))
+        matches = list(tmp_dir.glob("**/ghconcat.py"))
         if not matches:
             _fatal("No ghconcat.py found in the cloned repository.")
 
-        src = matches[0]                # use the first match
-        DEST_DIR.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, DEST_FILE)
-        DEST_FILE.chmod(DEST_FILE.stat().st_mode | stat.S_IXUSR)
+        src = matches[0]
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest_file)
+        dest_file.chmod(dest_file.stat().st_mode | stat.S_IXUSR)
 
-        print(f"✔ ghconcat successfully updated at {DEST_FILE}")
-        print("⚠ Make sure ~/.bin is in your PATH and OPENAI_API_KEY is set.")
+        print(f"✔ ghconcat successfully updated → {dest_file}")
+        print("⚠ Ensure ~/.bin is in PATH and OPENAI_API_KEY is set.")
     except subprocess.CalledProcessError:
         _fatal("git clone failed (wrong URL or access denied?).")
     finally:
-        shutil.rmtree(TMP_DIR, ignore_errors=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     sys.exit(0)
 
 
 # ───────────────────── Extension management ─────────────────────
 def active_extensions(ns: argparse.Namespace) -> Set[str]:
-    """
-    Compute the set of active file extensions after all CLI flags are applied.
-
-    Decision matrix
-    ---------------
-    1. If **no inclusion flags** are provided, the default set defined in
-       ``DEFAULT_EXTENSIONS`` is activated.
-    2. Inclusion flags (``--xml``, ``--js``, etc.) add to the set.
-    3. Exclusion flags (``--no-xml``, …) remove from the set.
-    4. Extra extensions may be appended via ``-k``.
-
-    Parameters
-    ----------
-    ns:
-        Parsed CLI namespace.
-
-    Returns
-    -------
-    set[str]
-        A set of extensions to be considered (including the leading dot).
-
-    Raises
-    ------
-    SystemExit
-        If the resulting set is empty.
-    """
+    """Return active extensions after inclusion / exclusion flags."""
     exts: Set[str] = set()
     any_inc = (
         ns.alias_odoo or ns.inc_py or ns.inc_dart or ns.inc_xml or
         ns.inc_csv or ns.inc_js or ns.inc_yml
     )
 
-    # 1. Default behaviour — multi‑extension
-    if not any_inc:
+    if not any_inc:                      # default
         exts.add(".py")
-
-    # 2. Explicit inclusions
     if ns.alias_odoo:
         exts.update({".py", ".xml", ".csv", ".js"})
     if ns.inc_py:
@@ -487,7 +331,6 @@ def active_extensions(ns: argparse.Namespace) -> Set[str]:
     if ns.inc_yml:
         exts.update({".yml", ".yaml"})
 
-    # 3. Explicit exclusions
     if ns.no_py:
         exts.discard(".py")
     if ns.no_xml:
@@ -497,7 +340,6 @@ def active_extensions(ns: argparse.Namespace) -> Set[str]:
     if ns.no_csv:
         exts.discard(".csv")
 
-    # 4. Extra extensions via -k
     if ns.add_ext:
         for ext in ns.add_ext:
             ext = ext if ext.startswith(".") else f".{ext}"
@@ -510,14 +352,7 @@ def active_extensions(ns: argparse.Namespace) -> Set[str]:
 
 # ───────────────────── File discovery ─────────────────────
 def is_hidden(path: Path) -> bool:
-    """
-    Determine whether *path* refers to a hidden file or directory.
-
-    Returns
-    -------
-    bool
-        ``True`` if any path component starts with a dot.
-    """
+    """Return ``True`` if *path* has any hidden component."""
     return any(p.startswith(".") for p in path.parts)
 
 
@@ -527,29 +362,7 @@ def collect_files(roots: List[str],
                   suffixes: List[str],
                   extensions: Set[str],
                   explicit_files: Set[Path]) -> List[Path]:
-    """
-    Discover candidate files applying all active filters.
-
-    Parameters
-    ----------
-    roots:
-        Directories or files supplied by the user.
-    excludes:
-        Sub‑strings that, when present in the full path, discard the file.
-    exclude_dirs:
-        Absolute directories to prune from the walk.
-    suffixes:
-        File‑name suffixes that **must** match (empty means *any*).
-    extensions:
-        Whitelisted extensions (including the leading dot).
-    explicit_files:
-        Files that must be kept even if their extension does not match.
-
-    Returns
-    -------
-    list[pathlib.Path]
-        Sorted list of absolute paths that match the criteria.
-    """
+    """Return sorted list of paths that pass all filters."""
     found: Set[Path] = set()
     ex_dir_paths = [Path(d).resolve() for d in exclude_dirs]
 
@@ -557,11 +370,9 @@ def collect_files(roots: List[str],
         return any(_is_within(p, ex) for ex in ex_dir_paths)
 
     def consider(fp: Path) -> None:
-        # Always keep explicitly requested files
-        if fp in explicit_files:
+        if fp in explicit_files:         # keep explicit files regardless
             found.add(fp)
             return
-
         fname = fp.name
         ext = fp.suffix.lower()
         if ext not in extensions or is_hidden(fp) or dir_excluded(fp):
@@ -608,27 +419,7 @@ RE_JS_EXPORT   = re.compile(r"^\s*(?:export\b|module\.exports\b)")
 
 
 def discard_comment(line: str, ext: str, simple: bool, full: bool) -> bool:
-    """
-    Decide whether *line* should be removed as a comment.
-
-    The decision depends on the file extension and the active switches.
-
-    Parameters
-    ----------
-    line:
-        Raw line read from the source file.
-    ext:
-        File extension including the leading dot.
-    simple:
-        Remove *simple* comments (single‑line, non‑doc).
-    full:
-        Remove **all** comments, including documentation blocks.
-
-    Returns
-    -------
-    bool
-        ``True`` if the line must be discarded.
-    """
+    """Return ``True`` if *line* should be removed as comment."""
     if ext == ".py":
         return (full and RE_PY_FULL.match(line)) or (simple and RE_PY_SIMPLE.match(line))
     if ext == ".dart":
@@ -637,23 +428,7 @@ def discard_comment(line: str, ext: str, simple: bool, full: bool) -> bool:
 
 
 def discard_import(line: str, ext: str, enable: bool) -> bool:
-    """
-    Decide whether *line* should be removed because it is an import statement.
-
-    Parameters
-    ----------
-    line:
-        The source line.
-    ext:
-        File extension.
-    enable:
-        Master switch (``--rm-import``).
-
-    Returns
-    -------
-    bool
-        ``True`` when the line should be discarded.
-    """
+    """Return ``True`` when *line* is an import to be removed."""
     if not enable:
         return False
     return ((ext == ".py" and RE_PY_IMPORT.match(line)) or
@@ -662,23 +437,7 @@ def discard_import(line: str, ext: str, enable: bool) -> bool:
 
 
 def discard_export(line: str, ext: str, enable: bool) -> bool:
-    """
-    Decide whether *line* should be removed because it is an export statement.
-
-    Parameters
-    ----------
-    line:
-        The source line.
-    ext:
-        File extension.
-    enable:
-        Master switch (``--rm-export``).
-
-    Returns
-    -------
-    bool
-        ``True`` when the line should be discarded.
-    """
+    """Return ``True`` when *line* is an export to be removed."""
     if not enable:
         return False
     return ((ext == ".dart" and RE_DART_EXPORT.match(line)) or
@@ -692,23 +451,7 @@ def cleaned_lines(src: Iterable[str],
                   rm_import: bool,
                   rm_export: bool,
                   keep_blank: bool) -> List[str]:
-    """
-    Clean the raw source lines according to the provided switches.
-
-    Parameters
-    ----------
-    src:
-        Iterable yielding the original lines.
-    ext:
-        File extension.
-    rm_simple / rm_all / rm_import / rm_export / keep_blank:
-        Active clean‑up options.
-
-    Returns
-    -------
-    list[str]
-        The resulting list of lines.
-    """
+    """Return list of cleaned lines according to toggles."""
     lines: List[str] = []
     for line in src:
         if discard_comment(line, ext, rm_simple, rm_all):
@@ -727,24 +470,7 @@ def cleaned_lines(src: Iterable[str],
 def compute_slice(total: int,
                   start_or_len: Optional[int],
                   end: Optional[int]) -> Tuple[int, int]:
-    """
-    Translate CLI ``-n`` / ``-N`` values into a slice tuple.
-
-    Parameters
-    ----------
-    total:
-        Total number of lines available.
-    start_or_len:
-        When **end** is ``None``, interpreted as *length*, otherwise as
-        1‑based *start* index.
-    end:
-        1‑based inclusive end index.
-
-    Returns
-    -------
-    tuple[int, int]
-        Zero‑based ``(start, end)`` indices; *end* is exclusive.
-    """
+    """Return 0‑based ``(start, end)`` (end exclusive) from CLI range flags."""
     if start_or_len is None and end is None:
         return 0, total
     if start_or_len is not None and end is None:
@@ -760,21 +486,7 @@ def apply_range(lines: List[str],
                 start_or_len: Optional[int],
                 end: Optional[int],
                 keep_header: bool) -> List[str]:
-    """
-    Slice *lines* according to CLI options and optionally prepend the header.
-
-    Parameters
-    ----------
-    lines:
-        Original lines.
-    start_or_len / end / keep_header:
-        Range options as provided by the CLI.
-
-    Returns
-    -------
-    list[str]
-        The sliced list of lines.
-    """
+    """Return sliced list of *lines* following -n / -N / -H."""
     total = len(lines)
     if total == 0:
         return lines
@@ -799,27 +511,7 @@ def concatenate(files: List[Path],
                 range_start_or_len: Optional[int],
                 range_end: Optional[int],
                 keep_header: bool) -> str:
-    """
-    Concatenate *files* and write the result to *out_path*.
-
-    Parameters
-    ----------
-    files:
-        Ordered list of absolute paths.
-    out_path:
-        Destination path (will be overwritten).
-    route_only:
-        When ``True``, only the file headers are written.
-    rm_simple / rm_all / rm_import / rm_export / keep_blank:
-        Content clean‑up options.
-    range_start_or_len / range_end / keep_header:
-        Line‑range options.
-
-    Returns
-    -------
-    str
-        The full dump as a single string (useful for IA).
-    """
+    """Concatenate *files* and write to *out_path*."""
     out_path = out_path.resolve()
     dump_parts: List[str] = []
 
@@ -853,92 +545,45 @@ def concatenate(files: List[Path],
     return "".join(dump_parts)
 
 
-# ───────────── IA (OpenAI) ─────────────
+# ───────────── IA (OpenAI) helpers ─────────────
 def _system_prompt(lang: str) -> str:
-    """
-    Build the system prompt to be sent to ChatGPT.
-
-    The base text is written in English. When *lang* is ``"ES"``, the word
-    **English** is replaced by **Spanish** (and nothing else).
-
-    Parameters
-    ----------
-    lang:
-        ``"EN"`` or ``"ES"`` (upper‑case).
-
-    Returns
-    -------
-    str
-        Fully adapted system prompt.
-    """
+    """Return system prompt (English or Spanish UI)."""
     prompt = (
         "You are an AI assistant specialized in software development.\n"
-        "Always respond in **English** and use **Markdown** to format answers "
-        "clearly, concisely, and properly formatted.\n\n"
+        "Always respond in **English** and use **Markdown** for clarity.\n\n"
         "### Quality principles\n"
         "1. Provide **robust, complete, production‑ready solutions**.\n"
-        "2. Each answer must be self‑contained: avoid incomplete snippets or "
-        "diffs.\n"
+        "2. Each answer must be self‑contained: avoid incomplete snippets or diffs.\n"
         "3. Virtually test all code before sending; **no errors are tolerated**.\n\n"
         "### Code requirements\n"
-        "- All code (variable names, functions, classes, etc.), together with "
-        "**docstrings** and **inline comments**, must be written in English and "
-        "follow best practices (PEP 8, Google Docstring, etc.).\n"
-        "- Provide **complete** files or code sections, properly indented and "
-        "formatted.\n"
-        "- Skip redundant comments: explain only what adds value.\n\n"
+        "- All code, docstrings and inline comments must be in English and comply "
+        "with best practices (PEP 8, Google docstring, etc.).\n"
+        "- Provide **full** files or code sections, properly formatted.\n\n"
         "### Methodology\n"
-        "- Thoroughly analyse any code received before refactoring or extending "
-        "it.\n"
-        "- Use all your technical and computational capabilities to fulfill the "
-        "assigned tasks with maximum efficiency and precision."
+        "- Analyse any code received before refactoring.\n"
+        "- Use all technical capabilities to fulfil tasks efficiently."
     )
     if lang == "ES":
         prompt = prompt.replace("**English**", "**Spanish**")
     return prompt
 
 
-def run_openai(prompt_path: Path,
+def run_openai(user_msg: str,
                output_path: Path,
-               dump: str,
-               lang: str) -> None:
-    """
-    Send *dump* to ChatGPT using the template in *prompt_path*.
-
-    Parameters
-    ----------
-    prompt_path:
-        Path to the user prompt template (must contain ``{dump_data}``).
-    output_path:
-        File where the assistant reply will be written.
-    dump:
-        Source dump produced by :func:`concatenate`.
-    lang:
-        UI language chosen by the user (``"ES"`` or ``"EN"``).
-
-    Raises
-    ------
-    SystemExit
-        Whenever a blocking error occurs.
-    """
+               lang: str,
+               model: str = DEFAULT_OPENAI_MODEL) -> None:
+    """Contact OpenAI and write assistant reply to *output_path*."""
     if openai is None:
         _fatal("OpenAI is not installed. Run: pip install openai")
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         _fatal("Environment variable OPENAI_API_KEY is not set.")
-    try:
-        template = prompt_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        _fatal(f"Could not read {prompt_path}: {exc}")
-    if "{dump_data}" not in template:
-        _fatal(f"Placeholder {{dump_data}} not found in {prompt_path}.")
 
-    user_msg = template.replace("{dump_data}", dump)
     client = openai.OpenAI(api_key=api_key)
     print("Contacting OpenAI…")
     try:
         comp = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": _system_prompt(lang)},
                 {"role": "user", "content": user_msg}
@@ -956,31 +601,23 @@ def run_openai(prompt_path: Path,
         _fatal(f"Unexpected error while calling OpenAI: {exc}")
 
 
-# ───────────── Helper for re‑usable internal run ─────────────
+# ───────────── Template interpolation ─────────────
+_PLACEHOLDER = re.compile(r"\{([a-zA-Z_][\w\-]*)\}")
+
+def interpolate(template: str, values: Dict[str, str]) -> str:
+    """Return *template* with `{placeholders}` replaced by *values*."""
+    def _sub(match: re.Match[str]) -> str:
+        name = match.group(1)
+        return values.get(name, match.group(0))
+    return _PLACEHOLDER.sub(_sub, template)
+
+
+# ───────────── Helper for reusable internal run ─────────────
 def perform_concatenation(ns: argparse.Namespace,
                           base_root: Path,
                           override_output: Optional[Path] = None) -> str:
-    """
-    Execute a single concatenation job according to *ns*.
-
-    Parameters
-    ----------
-    ns:
-        Active CLI namespace.
-    base_root:
-        Base directory used to resolve relative paths.
-    override_output:
-        Destination file to be used instead of ``ns.output`` (typically a
-        temporary file when running sub‑jobs).
-
-    Returns
-    -------
-    str
-        The dump generated by :func:`concatenate` or an empty string when no
-        file matched.
-    """
-    # Prepare roots list and explicit files
-    if ns.batch_directives:   # nested batches aren’t allowed
+    """Run a single concatenation job and return its dump."""
+    if ns.batch_directives:
         _fatal("Error: nested -X directives are not allowed.")
 
     raw_roots = ns.roots or [str(base_root)]
@@ -995,7 +632,6 @@ def perform_concatenation(ns: argparse.Namespace,
         if p.is_file():
             explicit_files.add(p)
 
-    # Exclude directories
     exclude_dirs: List[str] = []
     for d in ns.exclude_dir or []:
         p = Path(d)
@@ -1013,10 +649,10 @@ def perform_concatenation(ns: argparse.Namespace,
         explicit_files=explicit_files,
     )
     if not files:
-        return ""  # silently return empty dump
+        return ""
 
     tmp_out = override_output or Path(ns.output)
-    dump = concatenate(
+    return concatenate(
         files,
         out_path=tmp_out,
         route_only=ns.route_only,
@@ -1029,47 +665,44 @@ def perform_concatenation(ns: argparse.Namespace,
         range_end=ns.range_end,
         keep_header=ns.keep_header,
     )
-    return dump
 
 
 # ────────────────────────── main ──────────────────────────
+def _parse_ia_set(item: str, dump_value: str) -> Tuple[str, str]:
+    """Return ``(name, value)`` from *item* which can be ``name`` or ``name=val``."""
+    if "=" in item:
+        n, v = item.split("=", 1)
+        return n.strip(), v
+    return item.strip(), dump_value
+
+
 def main() -> None:
-    """
-    Entry point for the *ghconcat* CLI.
-
-    The procedure is:
-
-    1. Parse command‑line arguments.
-    2. Run *--upgrade* if requested and exit.
-    3. Validate --ia-* parameters.
-    4. Perform the main concatenation and any ``-X`` sub‑jobs.
-    5. Aggregate all dumps into the final output file.
-    6. Optionally invoke ChatGPT.
-
-    Keyboard interrupts and broken pipes are handled gracefully.
-    """
+    """CLI entry point."""
     ns = parse_cli()
 
-    # --upgrade takes precedence over everything else.
+    # --upgrade has top priority
     if ns.upgrade:
         perform_upgrade()
 
-    # Validate IA flags pair
-    if bool(ns.ia_prompt) ^ bool(ns.ia_output):
-        _fatal("You must provide both --ia-prompt and --ia-output.")
+    # --ia-set is forbidden in the top‑level call  # ← NEW validation
+    if ns.ia_set:
+        _fatal("--ia-set can only be used inside files loaded with -X.")
+
+    # --ia-output depends on --ia-prompt
+    if ns.ia_output and not ns.ia_prompt:
+        _fatal("--ia-output requires --ia-prompt.")
 
     base_root = Path(ns.base_root).resolve() if ns.base_root else Path.cwd()
-
-    # Decide whether the main invocation should act as concat itself
     orchestrates_only = bool(ns.batch_directives) and not ns.roots
 
     final_parts: List[str] = []
+    prompt_vars: Dict[str, str] = {}
 
-    # 1. If main invocation has its own roots, run it first
+    # 1. Main invocation (only if it has its own roots)
     if not orchestrates_only:
-        tmp_dest = Path(tempfile.mktemp(prefix="ghconcat_main_", suffix=".tmp"))
-        part = perform_concatenation(ns, base_root, override_output=tmp_dest)
-        tmp_dest.unlink(missing_ok=True)
+        tmp = Path(tempfile.mktemp(prefix="ghconcat_main_", suffix=".tmp"))
+        part = perform_concatenation(ns, base_root, override_output=tmp)
+        tmp.unlink(missing_ok=True)
         if part:
             final_parts.append(part)
 
@@ -1082,44 +715,62 @@ def main() -> None:
         tokens = _parse_directive_file(dpath)
         sub_ns = build_parser().parse_args(tokens)
 
-        # Neutralise IA and output for sub‑runs
-        sub_ns.ia_prompt = None
+        sub_ns.ia_prompt = None          # ignore IA inside sub‑runs
         sub_ns.ia_output = None
-        sub_ns.batch_directives = None     # forbid nesting
-
-        # Inherit root if not given
+        sub_ns.batch_directives = None
         if not sub_ns.base_root and ns.base_root:
             sub_ns.base_root = ns.base_root
 
-        # ---- Merge flags from N‑1 into this sub‑namespace
         inherit_flags(ns, sub_ns)
 
-        tmp_dest = Path(tempfile.mktemp(prefix="ghconcat_sub_", suffix=".tmp"))
+        tmp = Path(tempfile.mktemp(prefix="ghconcat_sub_", suffix=".tmp"))
         part = perform_concatenation(sub_ns,
                                      base_root=Path(sub_ns.base_root).resolve()
                                      if sub_ns.base_root else base_root,
-                                     override_output=tmp_dest)
-        tmp_dest.unlink(missing_ok=True)
+                                     override_output=tmp)
+        tmp.unlink(missing_ok=True)
         if part:
             final_parts.append(part)
+            for item in sub_ns.ia_set or []:           # ← NEW: gather vars
+                name, val = _parse_ia_set(item, part)
+                if name in prompt_vars:
+                    print(f"Warning: placeholder {name!r} overwritten.", file=sys.stderr)
+                prompt_vars[name] = val
 
-    # 3. Consolidate and write to final output
-    consolidated_dump = "".join(final_parts)
+    # 3. Consolidate dump.txt
+    consolidated = "".join(final_parts)
     out_path = Path(ns.output).resolve()
     try:
-        out_path.write_text(consolidated_dump, encoding="utf-8")
+        out_path.write_text(consolidated, encoding="utf-8")
     except OSError as exc:
         _fatal(f"Error writing {out_path}: {exc}")
     print(f"Concatenation complete → {out_path}")
 
-    # 4. Optional IA
+    # 4. Prompt handling
     if ns.ia_prompt:
-        run_openai(
-            prompt_path=Path(ns.ia_prompt),
-            output_path=Path(ns.ia_output),
-            dump=consolidated_dump,
-            lang=ns.lang,
-        )
+        t_path = Path(ns.ia_prompt)
+        try:
+            template = t_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            _fatal(f"Could not read {t_path}: {exc}")
+
+        prompt_vars.setdefault("dump_data", consolidated)
+        interpolated = interpolate(template, prompt_vars)
+
+        inp_path = t_path.with_name(f"{t_path.stem}.input{t_path.suffix}")
+        try:
+            inp_path.write_text(interpolated, encoding="utf-8")
+        except OSError as exc:
+            _fatal(f"Could not write {inp_path}: {exc}")
+        print(f"Interpolated prompt written → {inp_path}")
+
+        if ns.ia_output:
+            run_openai(
+                user_msg=interpolated,
+                output_path=Path(ns.ia_output),
+                lang=ns.lang,
+                model=ns.ia_model,
+            )
 
 
 # ─────────────────────── safe‑entrypoint ───────────────────────
@@ -1127,7 +778,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        _fatal("Keyboard interrupt (Ctrl‑C) — operation cancelled.", 130)
+        _fatal("Keyboard interrupt — cancelled.", 130)
     except BrokenPipeError:
         sys.exit(0)
     except Exception as exc:           # pragma: no cover
