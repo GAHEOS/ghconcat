@@ -595,8 +595,7 @@ def _execute_single(ns: argparse.Namespace, workspace: Path, root: Path) -> str:
 def _execute(ns: argparse.Namespace) -> None:
     """Entry‑point that handles batches (-X) and self‑upgrade."""
     if ns.upgrade:
-        import sys
-        sys.modules["ghconcat"]._perform_upgrade()
+        _perform_upgrade()
 
     workspace = _resolve_path(Path.cwd(), ns.workspace)
     if not workspace.exists():
