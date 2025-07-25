@@ -750,7 +750,7 @@ def main() -> None:  # pragma: no cover
 if __name__ == "__main__":  # pragma: no cover
     main()
 
-if __name__ != "ghconcat":
-    mod = sys.modules.setdefault("ghconcat", sys.modules[__name__])
-    mod._call_openai = _call_openai
-    mod._perform_upgrade = _perform_upgrade
+pkg = sys.modules.get("ghconcat")
+if pkg is not None and pkg is not sys.modules[__name__]:
+    pkg._call_openai = _call_openai
+    pkg._perform_upgrade = _perform_upgrade
