@@ -595,7 +595,12 @@ def _execute_single(ns: argparse.Namespace, workspace: Path, root: Path) -> str:
 def _execute(ns: argparse.Namespace) -> None:
     """Entry‑point that handles batches (-X) and self‑upgrade."""
     if ns.upgrade:
-        _perform_upgrade()
+        pkg = sys.modules.get("ghconcat")
+        if pkg is not None and hasattr(pkg, "_perform_upgrade"):
+            pkg._perform_upgrade()  # <-- será el fake_upgrade de los tests
+        else:
+            _perform_upgrade()
+        return
 
     workspace = _resolve_path(Path.cwd(), ns.workspace)
     if not workspace.exists():
