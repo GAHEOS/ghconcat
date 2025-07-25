@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import re
 from pathlib import Path
 from typing import List
 from unittest.mock import patch
@@ -30,18 +31,67 @@ except ModuleNotFoundError:  # pragma: no cover
     sys.path.insert(0, str(ROOT / "ghconcat" / "src"))
     import ghconcat  # type: ignore
 
-from ghconcat.src.ghconcat import GhConcat  # type: ignore
+from ghconcat.src.ghconcat import GhConcat, HEADER_DELIM  # type: ignore
 
 # --------------------------------------------------------------------------- #
 #  Helpers and constants                                                      #
 # --------------------------------------------------------------------------- #
 FIXTURES = Path(__file__).resolve().parents[1] / 'tests' / "test-fixtures"
 DUMP = FIXTURES / "dump.txt"  # default output file
+WS1 = FIXTURES / "ws1"
+WS2 = FIXTURES / "ws2"
+INLINE_FILES = ["inline1.gcx", "inline2.gcx", "inline3.gcx"]
+BATCH_FILES = ["batch1.gcx", "batch2.gcx", "batch3.gcx"]
 
 
 def _run(args: List[str]) -> str:
     """Execute GhConcat with *args* forcing --workspace=FIXTURES."""
     return GhConcat.run(args + ["-w", str(FIXTURES)])
+
+
+def _ensure_directive_fixtures() -> None:
+    """Crea los gcx y workspaces si no existen (idempotente)."""
+    if not WS1.exists():
+        (WS1 / "src/other").mkdir(parents=True, exist_ok=True)
+        for src in (FIXTURES / "src/other").iterdir():
+            shutil.copy2(src, WS1 / "src/other" / src.name)
+    if not WS2.exists():
+        (WS2 / "src/module").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            FIXTURES / "src/module/echo.dart",
+            WS2 / "src/module/echo.dart",
+        )
+    directives = {
+        "inline1.gcx": "-a src/module/charlie.js\n-g js\n-n 1\n-N 2\n",
+        "inline2.gcx": "-a src/module/omega.xml\n-g xml\n-n 2\n",
+        "inline3.gcx": "-a extra/sample.go\n-g go\n",
+        "batch1.gcx": "-w ws1\n-a src/other\n-g py\n-n 1\n-N 3\n",
+        "batch2.gcx": "-r src\n-a other/delta.js\n-g js\n",
+        "batch3.gcx": "-w ws2\n-r src\n-a module/echo.dart\n-g dart\n",
+    }
+    for name, body in directives.items():
+        tgt = FIXTURES / name
+        if not tgt.exists():
+            tgt.write_text(body, encoding="utf-8")
+
+
+def _extract_segment(dump: str, filename: str) -> str:
+    """
+    Devuelve el segmento de *dump* correspondiente a *filename*.
+
+    Coincide con cualquier ruta que termine en ``filename``, seguida de
+    HEADER_DELIM y salto de línea, y devuelve desde ahí hasta el siguiente
+    encabezado o EOF.
+    """
+    pattern = re.compile(
+        rf"{re.escape(HEADER_DELIM)}[^\n]*{re.escape(filename)}[^\n]*\n", re.M
+    )
+    m = pattern.search(dump)
+    if not m:
+        return ""
+    start = m.end()
+    nxt = dump.find(HEADER_DELIM, start)
+    return dump[start:nxt if nxt != -1 else None]
 
 
 class FixtureTreeMissing(Exception):
@@ -277,6 +327,60 @@ class ExtraEdgeCaseTests(unittest.TestCase):
         """After applying ``--skip-lang`` ghconcat must abort when no ext remains."""
         with self.assertRaises(SystemExit):
             _run(["-g", "py", "-G", "py", "-a", "src"])
+
+
+class CrossDirectiveCombinationTest(unittest.TestCase):
+    """Escenario único de alta cobertura combinando 3×-x y 3×-X."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not FIXTURES.exists():
+            raise RuntimeError("Fixture tree missing. Run full_fixtures.sh primero.")
+        _ensure_directive_fixtures()
+
+    def test_multi_level_directives(self) -> None:
+        """Valida la salida combinada de 3 -x y 3 -X con overrides."""
+        cli: List[str] = ["-g", "py", "-r", "."]
+        for xf in INLINE_FILES:
+            cli += ["-x", xf]
+        for bf in BATCH_FILES:
+            cli += ["-X", bf]
+        cli += ["-a", "src/module/alpha.py"]
+
+        dump = _run(cli)
+
+        # ------ presencia de todos los archivos ------
+        expected = [
+            "alpha.py",
+            "charlie.js",
+            "omega.xml",
+            "sample.go",
+            "beta.py",
+            "delta.js",
+            "echo.dart",
+        ]
+        for fname in expected:
+            with self.subTest(file=fname):
+                self.assertIn(fname, dump)
+
+        # ------ slicing charlie.js (-n 1 -N 2 -i) ------
+        charlie_seg = _extract_segment(dump, "charlie.js")
+        self.assertIn("// simple comment", charlie_seg)  # import fue removido
+        self.assertNotIn("export function charlie", charlie_seg)
+
+        # ------ slicing omega.xml (-n 2) ------
+        omega_seg = _extract_segment(dump, "omega.xml")
+        self.assertIn("<root>", omega_seg)
+        self.assertNotIn("</root>", omega_seg)
+
+        # ------ slicing beta.py (-n 1 -N 3) ------
+        beta_seg = _extract_segment(dump, "beta.py")
+        self.assertIn("def beta()", beta_seg)
+        self.assertNotIn("return 2", beta_seg)
+
+        # ------ número de encabezados ------
+        header_count = dump.count(HEADER_DELIM)
+        self.assertEqual(header_count, len(expected) * 2)  # dos ocurrencias por archivo
 
 
 # --------------------------------------------------------------------------- #
