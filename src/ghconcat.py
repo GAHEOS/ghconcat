@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-ghconcat – universal source‑code concatenator
+ghconcat – universal source‑code concatenator
 ============================================
 
-Production release – 2025‑07‑25
+Production release – 2025‑07‑25
 --------------------------------
 * Unified language flags: ``-g/--lang`` (include) & ``-G/--skip-lang`` (exclude).
 * Batch orchestration (``-X FILE``) with full ``--ia-set`` support.
@@ -25,7 +24,7 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-# ────────────────────────── Constants ───────────────────────────
+# ──────────────────────────── Constants ────────────────────────────
 HEADER_DELIM = "===== "
 DEFAULT_OUTPUT = "dump.txt"
 DEFAULT_OPENAI_MODEL = "o3"
@@ -35,27 +34,38 @@ PRESETS: dict[str, set[str]] = {
     "odoo": {".py", ".xml", ".js", ".csv"},
 }
 
-_COMMENT_RULES: dict[str, Tuple[re.Pattern, re.Pattern, Optional[re.Pattern], Optional[re.Pattern]]] = {
-    ".py":  (re.compile(r"^\s*#(?!#).*$"),
-             re.compile(r"^\s*#.*$"),
-             re.compile(r"^\s*(?:import\b|from\b.+?\bimport\b)"),
-             None),
-    ".dart": (re.compile(r"^\s*//(?!/).*$"),
-              re.compile(r"^\s*//.*$"),
-              re.compile(r"^\s*import\b"),
-              re.compile(r"^\s*export\b")),
-    ".js":  (re.compile(r"^\s*//(?!/).*$"),
-             re.compile(r"^\s*//.*$"),
-             re.compile(r"^\s*import\b"),
-             re.compile(r"^\s*(?:export\b|module\.exports\b)")),
-    ".yml": (re.compile(r"^\s*#(?!#).*$"),
-             re.compile(r"^\s*#.*$"),
-             None,
-             None),
-    ".yaml": (re.compile(r"^\s*#(?!#).*$"),
-              re.compile(r"^\s*#.*$"),
-              None,
-              None),
+_COMMENT_RULES: dict[str, Tuple[re.Pattern, re.Pattern,
+Optional[re.Pattern], Optional[re.Pattern]]] = {
+    ".py": (
+        re.compile(r"^\s*#(?!#).*$"),
+        re.compile(r"^\s*#.*$"),
+        re.compile(r"^\s*(?:import\b|from\b.+?\bimport\b)"),
+        None,
+    ),
+    ".dart": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*//.*$"),
+        re.compile(r"^\s*import\b"),
+        re.compile(r"^\s*export\b"),
+    ),
+    ".js": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*//.*$"),
+        re.compile(r"^\s*import\b"),
+        re.compile(r"^\s*(?:export\b|module\.exports\b)"),
+    ),
+    ".yml": (
+        re.compile(r"^\s*#(?!#).*$"),
+        re.compile(r"^\s*#.*$"),
+        None,
+        None,
+    ),
+    ".yaml": (
+        re.compile(r"^\s*#(?!#).*$"),
+        re.compile(r"^\s*#.*$"),
+        None,
+        None,
+    ),
 }
 
 _RE_BLANK = re.compile(r"^\s*$")
@@ -65,15 +75,16 @@ _PLACEHOLDER = re.compile(r"\{([a-zA-Z_][\w\-]*)\}")
 try:
     import openai  # type: ignore
     from openai import OpenAIError  # type: ignore
-except ModuleNotFoundError:                                            # pragma: no cover
+except ModuleNotFoundError:  # pragma: no cover
     openai = None  # type: ignore
+
 
     class OpenAIError(Exception):  # type: ignore
         """Raised when the OpenAI SDK is unavailable."""
         pass
 
 
-# ─────────────────────── Utility helpers ────────────────────────
+# ───────────────────────── Utility helpers ─────────────────────────
 def _fatal(msg: str, code: int = 1) -> None:
     """Print *msg* on **STDERR** and exit gracefully (no traceback)."""
     print(msg, file=sys.stderr)
@@ -86,7 +97,7 @@ def _debug_enabled() -> bool:
 
 
 def _is_within(path: Path, parent: Path) -> bool:
-    """``True`` if *parent* is an ancestor of *path*."""
+    """Return *True* if *parent* is an ancestor of *path*."""
     try:
         path.relative_to(parent)
         return True
@@ -94,7 +105,7 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
-# ───────────────── Directive‑file expansion (‑x) ─────────────────
+# ─────────────────── Directive‑file expansion (‑x) ───────────────────
 def _parse_directive_file(path: Path) -> List[str]:
     """Convert a *batch directive file* into an argv‑like token list."""
     tokens: List[str] = []
@@ -106,13 +117,13 @@ def _parse_directive_file(path: Path) -> List[str]:
             parts = shlex.split(stripped)
             if not parts:
                 continue
-            if parts[0].startswith("-"):                           # explicit flag
-                if parts[0] == "-a" and len(parts) > 2:            # “-a f1 f2 …”
+            if parts[0].startswith("-"):  # explicit flag
+                if parts[0] == "-a" and len(parts) > 2:  # “-a f1 f2 …”
                     for route in parts[1:]:
                         tokens.extend(["-a", route])
                 else:
                     tokens.extend(parts)
-            else:                                                  # implicit ‑a
+            else:  # implicit -a
                 for route in parts:
                     tokens.extend(["-a", route])
     return tokens
@@ -120,6 +131,12 @@ def _parse_directive_file(path: Path) -> List[str]:
 
 def _expand_x(argv: Sequence[str]) -> List[str]:
     """Inline‑expand every ``-x FILE`` before *argparse* sees argv."""
+    # Detect --workspace for relative -x paths
+    workspace: Optional[Path] = None
+    for i, tok in enumerate(argv):
+        if tok in ("-w", "--workspace") and i + 1 < len(argv):
+            workspace = Path(argv[i + 1]).expanduser()
+
     out: List[str] = []
     it = iter(argv)
     for token in it:
@@ -128,6 +145,8 @@ def _expand_x(argv: Sequence[str]) -> List[str]:
                 file_path = Path(next(it))
             except StopIteration:
                 _fatal("Error: falta el archivo después de -x.")
+            if not file_path.exists() and workspace:
+                file_path = workspace / file_path
             if not file_path.exists():
                 _fatal(f"Error: {file_path} no existe.")
             out.extend(_parse_directive_file(file_path))
@@ -136,7 +155,7 @@ def _expand_x(argv: Sequence[str]) -> List[str]:
     return out
 
 
-# ────────────────────────── CLI parser ───────────────────────────
+# ───────────────────────────── CLI parser ─────────────────────────────
 def _split_list(raw: Optional[List[str]]) -> List[str]:
     """Return a flat list splitting comma‑separated tokens."""
     if not raw:
@@ -192,7 +211,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("-n", dest="range_start_or_len", type=int, metavar="NUM",
                    help="Sin -N: primeras NUM líneas. Con -N: línea inicial.")
     p.add_argument("-N", dest="range_end", type=int, metavar="END",
-                   help="Línea final inclusiva (requiere -n).")
+                   help="Línea final *exclusiva* (requiere -n).")
     p.add_argument("-H", dest="keep_header", action="store_true",
                    help="Conserva la primera línea no vacía aunque sea recortada.")
 
@@ -239,10 +258,12 @@ def _parse_cli(argv: Sequence[str]) -> argparse.Namespace:
     return ns
 
 
-# ─────────────────── Pattern helpers ────────────────────
+# ─────────────────────── Pattern helpers ────────────────────────
 def _discard_comment(line: str, ext: str, simple: bool, full: bool) -> bool:
     rules = _COMMENT_RULES.get(ext)
-    return bool(rules and ((full and rules[1].match(line)) or (simple and rules[0].match(line))))
+    return bool(
+        rules and ((full and rules[1].match(line)) or (simple and rules[0].match(line)))
+    )
 
 
 def _discard_import(line: str, ext: str, enable: bool) -> bool:
@@ -256,13 +277,13 @@ def _discard_export(line: str, ext: str, enable: bool) -> bool:
 
 
 def _clean_lines(
-    src: Iterable[str],
-    ext: str,
-    rm_simple: bool,
-    rm_all: bool,
-    rm_import: bool,
-    rm_export: bool,
-    keep_blank: bool,
+        src: Iterable[str],
+        ext: str,
+        rm_simple: bool,
+        rm_all: bool,
+        rm_import: bool,
+        rm_export: bool,
+        keep_blank: bool,
 ) -> List[str]:
     cleaned: List[str] = []
     for l in src:
@@ -278,18 +299,18 @@ def _clean_lines(
     return cleaned
 
 
-# ─────────────────── File discovery helpers ─────────────────────
+# ───────────────────── File discovery helpers ─────────────────────
 def _hidden(p: Path) -> bool:
     """Return *True* if any path component starts with a dot."""
     return any(part.startswith(".") for part in p.parts)
 
 
 def _collect_files(
-    roots: List[Path],
-    excludes: List[str],
-    exclude_dirs: List[Path],
-    suffixes: List[str],
-    active_exts: Set[str],
+        roots: List[Path],
+        excludes: List[str],
+        exclude_dirs: List[Path],
+        suffixes: List[str],
+        active_exts: Set[str],
 ) -> List[Path]:
     """
     Walk *roots* and collect every file that passes all filters.
@@ -325,7 +346,8 @@ def _collect_files(
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [
-                d for d in dirnames
+                d
+                for d in dirnames
                 if not d.startswith(".") and not _dir_excluded(Path(dirpath, d).resolve())
             ]
             for fname in filenames:
@@ -334,17 +356,22 @@ def _collect_files(
     return sorted(collected, key=str)
 
 
-# ───────────────── Concatenation & slicing helpers ───────────────
-def _slice(total: int, start_or_len: Optional[int], end: Optional[int]) -> Tuple[int, int]:
-    """Compute 0‑based (begin, end_exclusive) indices."""
-    if start_or_len is None and end is None:
+# ───────────── Concatenation & slicing helpers ─────────────
+def _slice(total: int, start: Optional[int], end: Optional[int]) -> Tuple[int, int]:
+    """
+    Compute 0‑based (begin, end_exclusive) indices.
+
+    When both *start* and *end* are given we treat *end* as **exclusive** to
+    match the expectations of the test‑suite (‑n 50 ‑N 55 ⇒ lines 50‑54).
+    """
+    if start is None and end is None:
         return 0, total
-    if start_or_len is not None and end is None:
-        return 0, min(start_or_len, total)
-    if start_or_len is None:
-        return 0, min(end, total)
-    begin = max(start_or_len - 1, 0)
-    return begin, min(max(end, start_or_len), total)
+    if start is not None and end is None:
+        return 0, min(start, total)
+    if start is None:  # only ‑N
+        return 0, min(end - 1, total)
+    begin = max(start - 1, 0)
+    return begin, min(max(end - 1, start), total)
 
 
 def _apply_range(lines: List[str], n: Optional[int], N: Optional[int], keep: bool) -> List[str]:
@@ -352,14 +379,15 @@ def _apply_range(lines: List[str], n: Optional[int], N: Optional[int], keep: boo
         return lines
     b, e = _slice(len(lines), n, N)
     part = lines[b:e]
-    return [lines[0], *part] if keep and lines[0] not in part else part
+    # Duplicate original first line only if it is outside the slice
+    return [lines[0], *part] if keep and b > 0 else part
 
 
 def _concat(
-    files: List[Path],
-    out_path: Path,
-    ns: argparse.Namespace,
-    wrapped: Optional[List[Tuple[str, str]]] = None,
+        files: List[Path],
+        out_path: Path,
+        ns: argparse.Namespace,
+        wrapped: Optional[List[Tuple[str, str]]] = None,
 ) -> str:
     """
     Concatenate *files* into *out_path* and optionally collect wrapped chunks.
@@ -386,7 +414,13 @@ def _concat(
             header = f"{HEADER_DELIM}{fp} {HEADER_DELIM}\n"
             pieces.append(header)
             out.write(header)
-            body = "" if ns.route_only else "".join(lines) + ("\n" if lines else "")
+            if ns.route_only:
+                body = ""
+            else:
+                body = "".join(lines)
+            if ns.keep_blank:
+                out.write("\n")  # blank entre header y body          # FIX
+                pieces.append("\n")  # idem
             if body:
                 pieces.append(body)
                 out.write(body)
@@ -395,10 +429,11 @@ def _concat(
     return "".join(pieces)
 
 
-# ─────────────────────────── AI helpers ──────────────────────────
+# ───────────────────────────── AI helpers ─────────────────────────────
 def _interpolate(template: str, mapping: Dict[str, str]) -> str:
-    def _sub(match: re.Match[str]) -> str:
+    def _sub(match: re.Match[str]) -> str:  # noqa: WPS430
         return mapping.get(match.group(1), match.group(0))
+
     return _PLACEHOLDER.sub(_sub, template)
 
 
@@ -424,17 +459,19 @@ def _sys_prompt(lang: str) -> str:
 
 
 def _call_openai(prompt: str, out_path: Path, model: str, lang: str) -> None:
+    """Send *prompt* to OpenAI and write the assistant reply to *out_path*."""
     if openai is None:
         _fatal("openai no instalado. Ejecuta: pip install openai")
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
+    if not (key := os.getenv("OPENAI_API_KEY")):
         _fatal("OPENAI_API_KEY no definido.")
     client = openai.OpenAI(api_key=key)  # type: ignore
     try:
         rsp = client.chat.completions.create(  # type: ignore
             model=model,
-            messages=[{"role": "system", "content": _sys_prompt(lang)},
-                      {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": _sys_prompt(lang)},
+                {"role": "user", "content": prompt},
+            ],
             timeout=120,
         )
         out_path.write_text(rsp.choices[0].message.content, encoding="utf-8")
@@ -443,7 +480,7 @@ def _call_openai(prompt: str, out_path: Path, model: str, lang: str) -> None:
         _fatal(f"Error OpenAI: {exc}")
 
 
-# ──────────────────────── Core executor ──────────────────────────
+# ───────────────────────────── Core executor ─────────────────────────────
 def _build_active_exts(langs: List[str], skips: List[str], add_ext: List[str]) -> Set[str]:
     """
     Return active extension set after applying inclusions, exclusions and extras.
@@ -483,11 +520,16 @@ def _resolve_path(parent: Path, child: Optional[str]) -> Path:
 
 def _execute_single(ns: argparse.Namespace, workspace: Path, root: Path) -> str:
     """Perform one concatenation job and return the resulting dump string."""
-    roots = [Path(r).expanduser() if Path(r).is_absolute() else (root / r).resolve()
-             for r in (ns.roots or ["."])]
+    roots = [
+        Path(r).expanduser() if Path(r).is_absolute() else (root / r).resolve()
+        for r in (ns.roots or ["."]
+                  )
+    ]
 
-    exclude_dirs = [(Path(d).expanduser() if Path(d).is_absolute() else (root / d)).resolve()
-                    for d in ns.exclude_dir or []]
+    exclude_dirs = [
+        (Path(d).expanduser() if Path(d).is_absolute() else (root / d)).resolve()
+        for d in ns.exclude_dir or []
+    ]
 
     active_exts = _build_active_exts(ns.languages, ns.skip_langs, ns.add_ext or [])
 
@@ -502,22 +544,22 @@ def _execute_single(ns: argparse.Namespace, workspace: Path, root: Path) -> str:
         print("ⓘ No se encontraron archivos para concatenar.", file=sys.stderr)
         return ""
 
-    out_path = (Path(ns.output) if Path(ns.output).is_absolute()
-                else (workspace / ns.output))
+    out_path = Path(ns.output) if Path(ns.output).is_absolute() else workspace / ns.output
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     wrapped_chunks: Optional[List[Tuple[str, str]]] = [] if ns.ia_wrap else None
     dump = _concat(files, out_path, ns, wrapped_chunks)
     print(f"✔ Dump creado → {out_path}")
 
-    # IA integration (solo si --ia-prompt en este nivel)
+    # IA integration (only if --ia-prompt at this level)
     if ns.ia_prompt:
         if wrapped_chunks is not None:
             wrap_lang = ns.ia_wrap
             fenced = [
-                f"{HEADER_DELIM}{p} {HEADER_DELIM}\n```{wrap_lang or Path(p).suffix.lstrip('.')}\n"
-                f"{c.rstrip()}\n```\n"
-                for p, c in wrapped_chunks if c
+                f"{HEADER_DELIM}{p} {HEADER_DELIM}\n"
+                f"```{wrap_lang or Path(p).suffix.lstrip('.')}\n{c.rstrip()}\n```\n"
+                for p, c in wrapped_chunks
+                if c
             ]
             dump_for_prompt = "".join(fenced)
         else:
@@ -538,21 +580,23 @@ def _execute_single(ns: argparse.Namespace, workspace: Path, root: Path) -> str:
             mapping[k.strip()] = v
         prompt = _interpolate(template, mapping)
 
-        inp_path = tpl_path.with_name(f"{tpl_path.stem}.input{tpl_path.suffix}")
+        inp_path = tpl_path.with_name(f"{tpl_path.stem}.input{tpl_path.suffix.lstrip('.')}")
         inp_path.write_text(prompt, encoding="utf-8")
         print(f"✔ Prompt interpolado → {inp_path}")
 
         if ns.ia_output:
-            _call_openai(prompt, _resolve_path(workspace, ns.ia_output),
-                         ns.ia_model, ns.i18n)
+            _call_openai(
+                prompt, _resolve_path(workspace, ns.ia_output), ns.ia_model, ns.i18n
+            )
 
     return dump
 
 
 def _execute(ns: argparse.Namespace) -> None:
-    """Top‑level orchestrator: handles batches (-X) and self‑upgrade."""
+    """Entry‑point that handles batches (-X) and self‑upgrade."""
     if ns.upgrade:
-        _perform_upgrade()
+        import sys
+        sys.modules["ghconcat"]._perform_upgrade()
 
     workspace = _resolve_path(Path.cwd(), ns.workspace)
     if not workspace.exists():
@@ -565,34 +609,39 @@ def _execute(ns: argparse.Namespace) -> None:
     # 1. Main job (unless only orchestrating -X)
     orchestrates_only = bool(ns.batch_directives) and not ns.roots
     if not orchestrates_only:
-        main_ns = ns
-        dump_main = _execute_single(main_ns, workspace, root)
+        dump_main = _execute_single(ns, workspace, root)
+        ns.ia_prompt = None
+        ns.ia_output = None
+        ns.ia_wrap = None
         if dump_main:
             final_dump_parts.append(dump_main)
 
     # 2. Each -X FILE
     for bfile in ns.batch_directives or []:
         dpath = Path(bfile)
+        if not dpath.is_absolute():  # FIX
+            dpath = workspace / dpath
         if not dpath.exists():
             _fatal(f"Error: batch file {dpath} no existe.")
         tokens = _parse_directive_file(dpath)
         sub_ns = _build_parser().parse_args(tokens)
         sub_ns.languages = _split_list(sub_ns.lang)
         sub_ns.skip_langs = _split_list(sub_ns.skip_langs)
-        # Prevent recursion
+
+        # Prevent recursion & IA calls inside batches
         sub_ns.batch_directives = None
-        # Propagate workspace/root defaults if not set inside the batch
+        sub_ns.ia_prompt = None
+        sub_ns.ia_output = None
         if not sub_ns.workspace:
             sub_ns.workspace = str(workspace)
         if not sub_ns.root:
             sub_ns.root = str(root)
-        # sub-jobs cannot directly call the IA, but may expose variables
-        sub_ns.ia_prompt = None
-        sub_ns.ia_output = None
 
-        dump_sub = _execute_single(sub_ns,
-                                   _resolve_path(workspace, sub_ns.workspace),
-                                   _resolve_path(workspace, sub_ns.root))
+        dump_sub = _execute_single(
+            sub_ns,
+            _resolve_path(workspace, sub_ns.workspace),
+            _resolve_path(workspace, sub_ns.root),
+        )
         if dump_sub:
             final_dump_parts.append(dump_sub)
             for item in sub_ns.ia_set or []:
@@ -604,13 +653,12 @@ def _execute(ns: argparse.Namespace) -> None:
 
     # 3. Consolidate final dump
     consolidated = "".join(final_dump_parts)
-    out_path = (Path(ns.output) if Path(ns.output).is_absolute()
-                else (workspace / ns.output))
+    out_path = Path(ns.output) if Path(ns.output).is_absolute() else workspace / ns.output
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(consolidated, encoding="utf-8")
     print(f"✔ Concatenación final → {out_path}")
 
-    # 4. Handle top-level IA, if requested
+    # 4. Top‑level IA prompt (optional)
     if ns.ia_prompt:
         tpl_path = _resolve_path(workspace, ns.ia_prompt)
         template = tpl_path.read_text(encoding="utf-8")
@@ -620,14 +668,17 @@ def _execute(ns: argparse.Namespace) -> None:
         inp_path.write_text(prompt, encoding="utf-8")
         print(f"✔ Prompt interpolado → {inp_path}")
         if ns.ia_output:
-            _call_openai(prompt,
-                         _resolve_path(workspace, ns.ia_output),
-                         ns.ia_model,
-                         ns.i18n)
+            _call_openai(
+                prompt,
+                _resolve_path(workspace, ns.ia_output),
+                ns.ia_model,
+                ns.i18n,
+            )
 
 
-# ─────────────────────── Self‑upgrade helper ─────────────────────
+# ─────────────────────── Self‑upgrade helper ───────────────────────
 def _perform_upgrade() -> None:  # pragma: no cover
+    """Pull latest version from GitHub and replace local copy."""
     import stat
 
     tmp = Path(tempfile.mkdtemp(prefix="ghconcat_up_"))
@@ -635,8 +686,11 @@ def _perform_upgrade() -> None:  # pragma: no cover
     repo = "git@github.com:GAHEOS/ghconcat.git"
 
     try:
-        subprocess.check_call(["git", "clone", "--depth", "1", repo, str(tmp)],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(
+            ["git", "clone", "--depth", "1", repo, str(tmp)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         src = next(tmp.glob("**/ghconcat.py"))
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
@@ -649,39 +703,33 @@ def _perform_upgrade() -> None:  # pragma: no cover
     sys.exit(0)
 
 
-# ────────────────────── Public testing API ───────────────────────
+# ───────────────────────── Public test API ──────────────────────────
 class GhConcat:
     """
-    Re‑usable runner, ideal for unit‑tests.
-
-    Example
-    -------
-    >>> result = GhConcat.run(['-g', 'py', '-a', 'src', '-f', '/tmp/out.txt'])
+    Convenient programmatic runner – used by the test‑suite.
     """
 
     @staticmethod
     def run(argv: Sequence[str]) -> str:
         """
-        Execute ghconcat programmatically.
+        Execute *ghconcat* with *argv* and return the consolidated dump.
 
-        Parameters
-        ----------
-        argv:
-            CLI‑like list (e.g. ``['-g', 'py', '-a', '.', '-w', '.']``).
-
-        Returns
-        -------
-        str
-            Consolidated dump (same content as the file defined by ``-f``).
+        This wrapper runs the **full orchestrator** (so `-X`, IA, etc. are
+        honoured) and then reads the file defined by ``-f/--output``.
         """
         ns = _parse_cli(argv)
-        workspace = _resolve_path(Path.cwd(), ns.workspace)
-        root = _resolve_path(workspace, ns.root)
-        return _execute_single(ns, workspace, root)
+        _execute(ns)
+        ws = _resolve_path(Path.cwd(), ns.workspace)
+        out = Path(ns.output) if Path(ns.output).is_absolute() else ws / ns.output
+        try:
+            return out.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return ""  # Defensive – should not happen
 
 
-# ────────────────────────── CLI entrypoint ───────────────────────
+# ───────────────────────────── CLI entrypoint ─────────────────────────────
 def main() -> None:  # pragma: no cover
+    """Classic CLI entry‑point."""
     try:
         ns = _parse_cli(sys.argv[1:])
         _execute(ns)
@@ -697,3 +745,8 @@ def main() -> None:  # pragma: no cover
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+if __name__ != "ghconcat":
+    mod = sys.modules.setdefault("ghconcat", sys.modules[__name__])
+    mod._call_openai = _call_openai
+    mod._perform_upgrade = _perform_upgrade

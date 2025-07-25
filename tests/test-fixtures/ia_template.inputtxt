@@ -1,0 +1,13 @@
+### Context
+===== /Users/leonardo/Odoo/17.0/GAHEOS-17.0/ghconcat/tests/test-fixtures/src/module/alpha.py ===== 
+```python
+# simple comment
+import os
+from sys import argv  # inline
+def alpha():
+    """Return 1."""
+    return 1  # trailing
+```
+
+
+### Please summarise
