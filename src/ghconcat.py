@@ -3,15 +3,14 @@
 ghconcat – universal source‑code concatenator
 ============================================
 
-Production release – 2025‑07‑26 (final)
----------------------------------------
-Spec v2 + post‑review fixes:
-
-* ``--alias/-A`` in an ``-X`` context now exports the **whole dump produced** by
-  that context to its parent template (e.g. ``-A py_code`` → ``{py_code}``).
-* New ``--env/-V VAR=VAL`` sets arbitrary variables for template interpolation.
-* Header duplication ``-H`` is ignored when ``-N 1``; otherwise it appends
-  line 1 in front of the sliced block.
+Production release – 2025‑07‑27
+--------------------------------
+* Strong CLI validation: at least one **language** and one **route** are
+  mandatory at each level (except `--upgrade`).
+* Precise error messages instead of generic “After applying --skip-lang …”.
+* `_validate_sub_ns` enforces presence of `-g` and `-a` and forbids nested
+  `-x/-X` in sub‑contexts.
+* All previous features kept intact.
 """
 
 from __future__ import annotations
@@ -85,7 +84,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
     class OpenAIError(Exception):  # type: ignore
         """Raised when the OpenAI SDK is unavailable."""
-        pass
+        ...
 
 
 # ───────────────────────── Utility helpers ─────────────────────────
@@ -122,7 +121,7 @@ def _parse_directive_file(path: Path) -> List[str]:
             if not parts:
                 continue
             if parts[0].startswith("-"):  # explicit flag
-                if parts[0] == "-a" and len(parts) > 2:  # “-a f1 f2 …”
+                if parts[0] == "-a" and len(parts) > 2:
                     for route in parts[1:]:
                         tokens.extend(["-a", route])
                 else:
@@ -134,15 +133,9 @@ def _parse_directive_file(path: Path) -> List[str]:
 
 
 def _expand_x(argv: Sequence[str]) -> List[str]:
-    """
-    Inline‑expand ``-x FILE`` before *argparse* sees argv.
-
-    Exactly **one** ``-x`` is allowed and it **must** be the sole user argument
-    (aside from ``ghconcat`` itself).
-    """
+    """Inline‑expand ``-x FILE`` before *argparse* sees argv."""
     if argv.count("-x") > 1:
         _fatal("Only one -x directive file is allowed.")
-
     if "-x" in argv and len(argv) > 2:
         _fatal("When -x is specified, no other CLI arguments are permitted.")
 
@@ -167,10 +160,10 @@ def _split_list(raw: Optional[List[str]]) -> List[str]:
     """Return a flat list splitting comma‑separated tokens."""
     if not raw:
         return []
-    out: List[str] = []
+    flat: List[str] = []
     for item in raw:
-        out.extend([p.strip() for p in re.split(r"[,\s]+", item) if p.strip()])
-    return out
+        flat.extend([p.strip() for p in re.split(r"[,\s]+", item) if p.strip()])
+    return flat
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -178,100 +171,60 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ghconcat",
         add_help=False,
-        usage=(
-            "%(prog)s [-x FILE] [-X FILE] -g LANG[,LANG...] "
-            "[-G LANG] [-r DIR] [-w DIR] [-a PATH]... [OPTIONS]"
-        ),
+        usage="%(prog)s [-x FILE] [-X FILE] -g LANG[,LANG...] "
+              "[-G LANG] [-r DIR] [-w DIR] [-a PATH]... [OPTIONS]",
     )
-
     # Pre‑processing
     p.add_argument("-x", metavar="FILE",
                    help="Loads a directive file (level 0 only).")
     p.add_argument("-X", action="append", dest="batch_directives", metavar="FILE",
                    help="Executes a nested batch file (level >0).")
 
-    # Location flags
-    p.add_argument("-r", "--root", metavar="DIR",
-                   help="Logical root for relative paths.")
-    p.add_argument("-w", "--workspace", metavar="DIR",
-                   help="Working directory where results are written.")
-    p.add_argument("-a", action="append", dest="roots", metavar="PATH",
-                   help="File or directory added to the search set.")
-    p.add_argument("-e", action="append", dest="exclude", metavar="PAT",
-                   help="Excludes paths containing PAT.")
-    p.add_argument("-E", action="append", dest="exclude_dir", metavar="DIR",
-                   help="Excludes DIR and its sub‑directories.")
-    p.add_argument("-p", action="append", dest="suffix", metavar="SUF",
-                   help="Only files whose name ends with SUF.")
+    # Locations
+    p.add_argument("-r", "--root", metavar="DIR")
+    p.add_argument("-w", "--workspace", metavar="DIR")
+    p.add_argument("-a", action="append", dest="roots", metavar="PATH")
+    p.add_argument("-e", action="append", dest="exclude", metavar="PAT")
+    p.add_argument("-E", action="append", dest="exclude_dir", metavar="DIR")
+    p.add_argument("-p", action="append", dest="suffix", metavar="SUF")
 
     # Languages
-    p.add_argument("-g", "--lang", action="append", metavar="LANG",
-                   help="Languages / extensions to include (alias 'odoo').")
-    p.add_argument("-G", "--skip-lang", action="append", dest="skip_langs", metavar="LANG",
-                   help="Languages / extensions to exclude from the active set.")
+    p.add_argument("-g", "--lang", action="append", metavar="LANG")
+    p.add_argument("-G", "--skip-lang", action="append", dest="skip_langs", metavar="LANG")
 
-    # Line range (new semantics)
-    p.add_argument("-n", dest="total_lines", type=int, metavar="NUM",
-                   help="Total lines to concatenate (after -N start).")
-    p.add_argument("-N", dest="first_line", type=int, metavar="START",
-                   help="First absolute line (1‑based) from which counting begins.")
-    p.add_argument("-H", dest="keep_header", action="store_true",
-                   help="Duplicates line 1 when excluded by -N/-n.")
-
-    # Behaviour
-    p.add_argument("-l", "--list", dest="list_only", action="store_true",
-                   help="Prints matching file routes; no body concatenation.")
-    p.add_argument("-c", dest="rm_simple", action="store_true",
-                   help="Removes single‑line comments.")
-    p.add_argument("-C", dest="rm_all", action="store_true",
-                   help="Removes **all** comments.")
-    p.add_argument("-S", dest="keep_blank", action="store_true",
-                   help="Keeps blank lines.")
-    p.add_argument("-i", dest="rm_import", action="store_true",
-                   help="Removes import statements.")
-    p.add_argument("-I", dest="rm_export", action="store_true",
-                   help="Removes export statements.")
-    p.add_argument("-W", "--wrap", dest="wrap_lang", metavar="LANG",
-                   help="Wrap each chunk in ```LANG``` fenced blocks.")
+    # Range & behaviour
+    p.add_argument("-n", dest="total_lines", type=int, metavar="NUM")
+    p.add_argument("-N", dest="first_line", type=int, metavar="START")
+    p.add_argument("-H", dest="keep_header", action="store_true")
+    p.add_argument("-l", "--list", dest="list_only", action="store_true")
+    p.add_argument("-c", dest="rm_simple", action="store_true")
+    p.add_argument("-C", dest="rm_all", action="store_true")
+    p.add_argument("-S", dest="keep_blank", action="store_true")
+    p.add_argument("-i", dest="rm_import", action="store_true")
+    p.add_argument("-I", dest="rm_export", action="store_true")
+    p.add_argument("-W", "--wrap", dest="wrap_lang", metavar="LANG")
 
     # Template & output
-    p.add_argument("-t", "--template", dest="template", metavar="FILE",
-                   help="Template used to format the dump or AI prompt.")
-    p.add_argument("-o", "--output", dest="output", metavar="FILE",
-                   help="Destination file (defaults depend on template).")
+    p.add_argument("-t", "--template", dest="template", metavar="FILE")
+    p.add_argument("-o", "--output", dest="output", metavar="FILE")
 
-    # AI integration
-    p.add_argument("--ai", action="store_true",
-                   help="Send the (templated) dump to OpenAI and store reply "
-                        "in --output.")
-    p.add_argument("--ai-model", dest="ai_model",
-                   default=DEFAULT_OPENAI_MODEL, metavar="MODEL",
-                   help=f"OpenAI model (default {DEFAULT_OPENAI_MODEL}).")
-    p.add_argument("-A", "--alias", dest="aliases", action="append",
-                   metavar="VAR",
-                   help="Exports dump result as {VAR} for parent template.")
-    p.add_argument("-V", "--env", dest="env_vars", action="append",
-                   metavar="VAR=VAL",
-                   help="Defines extra placeholders for template interpolation.")
-    p.add_argument("-M", "--ai-system-prompt", dest="ai_system_prompt",
-                   metavar="FILE",
-                   help="Overrides the built‑in system prompt.")
+    # AI
+    p.add_argument("--ai", action="store_true")
+    p.add_argument("--ai-model", dest="ai_model", default=DEFAULT_OPENAI_MODEL)
+    p.add_argument("-A", "--alias", dest="aliases", action="append", metavar="VAR")
+    p.add_argument("-V", "--env", dest="env_vars", action="append", metavar="VAR=VAL")
+    p.add_argument("-M", "--ai-system-prompt", dest="ai_system_prompt", metavar="FILE")
 
     # Misc
-    p.add_argument("--upgrade", action="store_true",
-                   help="Self‑updates ghconcat.")
-    p.add_argument("-L", "--i18n", default=DEFAULT_I18N, choices=["ES", "EN"],
-                   help="Language for runtime messages (ES default).")
+    p.add_argument("--upgrade", action="store_true")
+    p.add_argument("-L", "--i18n", default=DEFAULT_I18N, choices=["ES", "EN"])
     p.add_argument("-h", "--help", action="help")
-
     return p
 
 
 def _parse_cli(argv: Sequence[str]) -> argparse.Namespace:
-    """Expand -x directives and parse CLI into a namespace."""
+    """Expand -x directives and parse CLI."""
     ns = _build_parser().parse_args(_expand_x(argv))
-
-    # Post‑processing / defaults
     ns.languages = _split_list(ns.lang)
     ns.skip_langs = _split_list(ns.skip_langs)
 
@@ -281,16 +234,27 @@ def _parse_cli(argv: Sequence[str]) -> argparse.Namespace:
             ns.output = f"{tpl.stem}.out{tpl.suffix}"
         else:
             ns.output = DEFAULT_OUTPUT
-
     return ns
 
 
-# ─────────────────────── Pattern helpers ────────────────────────
+# ─── VALIDATION PATCH ───
+def _ensure_mandatory(ns: argparse.Namespace, *, level: int) -> None:
+    """Abort if required -g / -a are missing."""
+    if ns.upgrade:  # upgrade bypass
+        return
+    if not ns.languages:
+        _fatal("You must specify at least one -g/--lang.")
+    if not ns.roots:
+        _fatal("You must specify at least one -a PATH.")
+
+
+# ─────────────────────── Pattern helpers (unchanged) ───────────────────────
 def _discard_comment(line: str, ext: str, simple: bool, full: bool) -> bool:
     rules = _COMMENT_RULES.get(ext)
-    return bool(
-        rules and ((full and rules[1].match(line)) or (simple and rules[0].match(line)))
-    )
+    return bool(rules and (
+            (full and rules[1].match(line)) or
+            (simple and rules[0].match(line))
+    ))
 
 
 def _discard_import(line: str, ext: str, enable: bool) -> bool:
@@ -621,9 +585,8 @@ def _parse_env_list(env_items: List[str] | None) -> Dict[str, str]:
 
 
 def _validate_sub_ns(level_ns: argparse.Namespace) -> None:
-    """Ensure forbidden flags are not used in level > 0 batches."""
+    """Ensure forbidden flags & mandatory items in level > 0."""
     forbidden = []
-    # FIX: None (not provided) is allowed; only explicit non-default output is forbidden
     if level_ns.output not in (None, DEFAULT_OUTPUT):
         forbidden.append("--output")
     if level_ns.template:
@@ -634,26 +597,38 @@ def _validate_sub_ns(level_ns: argparse.Namespace) -> None:
         forbidden.append("--ai-model")
     if level_ns.upgrade:
         forbidden.append("--upgrade")
+    if level_ns.batch_directives or getattr(level_ns, "x", None):
+        forbidden.append("-x/-X")
 
     if forbidden:
         _fatal(f"Flags {', '.join(forbidden)} are not allowed inside -X contexts.")
 
+    # mandatory flags inside sub‑context
+    if not level_ns.lang or not level_ns.roots:
+        _fatal("Each -X context must include at least one -g and one -a.")
+
 
 def _execute(ns: argparse.Namespace) -> None:
-    """Entry‑point that handles batches (-X) and self‑upgrade."""
+    """Handle batches (-X) and self-upgrade."""
     if ns.upgrade:
         pkg = sys.modules.get("ghconcat")
         if pkg is not None and hasattr(pkg, "_perform_upgrade"):
-            pkg._perform_upgrade()  # <-- mocked in tests
+            pkg._perform_upgrade()
         else:
             _perform_upgrade()
         return
 
-    workspace = _resolve_path(Path.cwd(), ns.workspace)
+    # ¿El nivel 0 sólo orquesta sub-contextos?
+    orchestrates_only = bool(ns.batch_directives) and not ns.roots and not ns.languages
+
+    # Validación mandatoria solo si va a procesar archivos en N0
+    if not orchestrates_only:
+        _ensure_mandatory(ns, level=0)
+
+    workspace = _resolve_path(Path.cwd(), ns.workspace or ".")
     if not workspace.exists():
         _fatal(f"--workspace {workspace} does not exist.")
     root = _resolve_path(workspace, ns.root)
-
     global_env = _parse_env_list(ns.env_vars)
     prompt_vars: Dict[str, str] = dict(global_env)  # start with env vars
 
