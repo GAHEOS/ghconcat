@@ -1,15 +1,8 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# full_fixtures.sh – Builds the complete fixture tree for ghconcat test-suite
+# fixtures.sh – Builds the complete fixture tree for ghconcat test‑suite
 #
-# • Combina la lógica de *fixtures.sh* y *fixtures_ext_directives.sh*.
-# • Genera todos los archivos, directorios y workspaces adicionales.
-#
-# Usage
-#   ./tests/tools/full_fixtures.sh               # => tests/test-fixtures
-#   ./tests/tools/full_fixtures.sh /abs/path     # => /abs/path
-#
-# The script is idempotent: it wipes the target directory on each run.
+# Compatible with ghconcat spec v2 (2025‑07‑26).
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -28,7 +21,7 @@ mkdir -p \
   "$ROOT/.hidden" \
   "$ROOT/exclude_me"
 
-# ---------- Base fixtures (original fixtures.sh) -------------------------------
+# ---------- Base fixtures ------------------------------------------------------
 cat > "$ROOT/src/module/alpha.py" <<'PY'
 # simple comment
 import os
@@ -109,7 +102,7 @@ GCX
 cat > "$ROOT/batch.gcx" <<'GCX'
 -a extra
 -g go
---ia-set BATCH_DUMP
+-A BATCH_DUMP
 GCX
 
 echo "suffix test" > "$ROOT/src/module/file.testext"
@@ -144,25 +137,24 @@ cat > "$ROOT/batch_ws.gcx" <<'GCX'
 -w /tmp
 -a extra
 -g .txt
---ia-set WS_BATCH
+-A WS_BATCH
 GCX
 
 cat > "$ROOT/inline_wrap.gcx" <<'GCX'
 -a "src/module/ünicode dir/file with space.js"
 -g js
---ia-wrap js
+-W js
 GCX
 
 mkdir -p "$ROOT/src/.private/inner"
 echo "print('hidden nested')" > "$ROOT/src/.private/inner/nested.py"
 
-# ---------- Extended directive fixtures (was fixtures_ext_directives.sh) -------
-# Workspaces
+# ---------- Extended directive fixtures ---------------------------------------
 mkdir -p "$ROOT/ws1/src/other" "$ROOT/ws2/src/module"
 cp -a "$ROOT/src/other/."          "$ROOT/ws1/src/other/"
 cp    "$ROOT/src/module/echo.dart" "$ROOT/ws2/src/module/"
 
-# Inline -x files
+# Inline -x files (now will be used as -X)
 cat > "$ROOT/inline1.gcx" <<'GCX'
 -a src/module/charlie.js
 -g js

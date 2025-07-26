@@ -1,56 +1,102 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Full functional test-suite for *ghconcat.py* using the **unittest** framework.
+Full functional test‑suite for *ghconcat* (spec v2, 2025‑07‑26).
 
-It exercises every CLI switch (alone and in combination) with the fixture
-tree built by *fixtures.sh* + *fixtures_extra.sh*.  External calls to OpenAI
-are mocked to avoid network dependency.
+All command‑line switches introduced in the refactor are exercised.  External
+calls to OpenAI are mocked to keep the suite offline.
 """
 from __future__ import annotations
 
+import contextlib
 import os
+import re
 import shutil
 import tempfile
 import unittest
-import re
 from pathlib import Path
-from typing import List
+from typing import Iterator, List
 from unittest.mock import patch
 
 # --------------------------------------------------------------------------- #
-#  Adjust import path if ghconcat.py lives under ghconcat/src/ghconcat.py     #
+#  Dynamic import (works in editable installs and repo checkout)              #
 # --------------------------------------------------------------------------- #
 try:
-    # Case 1 – installed or repo root
-    import ghconcat  # type: ignore
+    from ghconcat.src import ghconcat
 except ModuleNotFoundError:  # pragma: no cover
     import sys
 
-    ROOT = Path(__file__).resolve().parents[2]  # adapt depth if needed
-    sys.path.insert(0, str(ROOT / "ghconcat" / "src"))
-    import ghconcat  # type: ignore
+    ROOT = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(ROOT))
+    from ghconcat.src import ghconcat
 
-from ghconcat.src.ghconcat import GhConcat, HEADER_DELIM  # type: ignore
+GhConcat = ghconcat.GhConcat  # type: ignore
+HEADER_DELIM = ghconcat.HEADER_DELIM  # type: ignore
 
 # --------------------------------------------------------------------------- #
 #  Helpers and constants                                                      #
 # --------------------------------------------------------------------------- #
 FIXTURES = Path(__file__).resolve().parents[1] / 'tests' / "test-fixtures"
-DUMP = FIXTURES / "dump.txt"  # default output file
+DUMP = FIXTURES / "dump.txt"
 WS1 = FIXTURES / "ws1"
 WS2 = FIXTURES / "ws2"
 INLINE_FILES = ["inline1.gcx", "inline2.gcx", "inline3.gcx"]
 BATCH_FILES = ["batch1.gcx", "batch2.gcx", "batch3.gcx"]
 
 
+@contextlib.contextmanager
+def _inside_fixtures() -> Iterator[None]:
+    """Temporarily ``chdir`` into the fixture root."""
+    cwd = Path.cwd()
+    os.chdir(FIXTURES)
+    try:
+        yield
+    finally:
+        os.chdir(cwd)
+
+
 def _run(args: List[str]) -> str:
-    """Execute GhConcat with *args* forcing --workspace=FIXTURES."""
-    return GhConcat.run(args + ["-w", str(FIXTURES)])
+    """
+    Execute *ghconcat* with *args*.
+
+    • If the call already provides ``-w/--workspace`` or a top‑level ``-x``,
+      we respect it; otherwise we inject ``-w FIXTURES`` for convenience.
+
+    The working directory is always changed to *FIXTURES* so that relative
+    paths inside gcx files resolve correctly.
+    """
+    base = list(args)
+    has_workspace = any(a in ("-w", "--workspace") for a in base)
+    if "-x" not in base and not has_workspace:
+        base += ["-w", str(FIXTURES)]
+
+    with _inside_fixtures():
+        return GhConcat.run(base)
 
 
+def _extract_segment(dump: str, filename: str) -> str:
+    """
+    Return the segment of *dump* corresponding to *filename*.
+
+    Matches any path ending in *filename*, then captures until the next
+    header delimiter or EOF.
+    """
+    pattern = re.compile(
+        rf"{re.escape(HEADER_DELIM)}[^\n]*{re.escape(filename)}[^\n]*\n", re.M
+    )
+    m = pattern.search(dump)
+    if not m:
+        return ""
+    start = m.end()
+    nxt = dump.find(HEADER_DELIM, start)
+    return dump[start:nxt if nxt != -1 else None]
+
+
+# --------------------------------------------------------------------------- #
+#  Directive‑fixture bootstrap (idempotent)                                   #
+# --------------------------------------------------------------------------- #
 def _ensure_directive_fixtures() -> None:
-    """Crea los gcx y workspaces si no existen (idempotente)."""
+    """Create gcx files and workspaces on‑the‑fly (only if missing)."""
     if not WS1.exists():
         (WS1 / "src/other").mkdir(parents=True, exist_ok=True)
         for src in (FIXTURES / "src/other").iterdir():
@@ -75,40 +121,21 @@ def _ensure_directive_fixtures() -> None:
             tgt.write_text(body, encoding="utf-8")
 
 
-def _extract_segment(dump: str, filename: str) -> str:
-    """
-    Devuelve el segmento de *dump* correspondiente a *filename*.
-
-    Coincide con cualquier ruta que termine en ``filename``, seguida de
-    HEADER_DELIM y salto de línea, y devuelve desde ahí hasta el siguiente
-    encabezado o EOF.
-    """
-    pattern = re.compile(
-        rf"{re.escape(HEADER_DELIM)}[^\n]*{re.escape(filename)}[^\n]*\n", re.M
-    )
-    m = pattern.search(dump)
-    if not m:
-        return ""
-    start = m.end()
-    nxt = dump.find(HEADER_DELIM, start)
-    return dump[start:nxt if nxt != -1 else None]
-
-
 class FixtureTreeMissing(Exception):
-    """Raised when the fixture tree was not generated."""
+    """Raised when the fixture tree is absent."""
 
 
 # --------------------------------------------------------------------------- #
-#  Test case classes                                                          #
+#  Base class                                                                 #
 # --------------------------------------------------------------------------- #
 class GhConcatBaseTest(unittest.TestCase):
-    """Base class providing common helpers and pre-checks."""
+    """Common helpers for all test cases."""
 
     @classmethod
     def setUpClass(cls) -> None:
         if not FIXTURES.exists():
             raise FixtureTreeMissing(
-                "Fixture tree not found. Run ./fixtures.sh && ./fixtures_extra.sh"
+                "Fixture tree not found. Run tests/tools/fixtures.sh first."
             )
 
     # ---------- utilities ---------- #
@@ -119,14 +146,17 @@ class GhConcatBaseTest(unittest.TestCase):
         self.assertNotIn(member, dump, msg or f"'{member}' unexpectedly present in dump")
 
 
+# --------------------------------------------------------------------------- #
+#  Test‑suites                                                                #
+# --------------------------------------------------------------------------- #
 class BasicBehaviourTests(GhConcatBaseTest):
-    """Standard happy-path scenarios."""
+    """Standard happy‑path scenarios."""
 
     def test_basic_python_concat(self) -> None:
         """Default run with -g py must concatenate only *.py files."""
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "out.txt"
-            dump = _run(["-g", "py", "-a", "src/module", "-f", str(out)])
+            dump = _run(["-g", "py", "-a", "src/module", "-o", str(out)])
             self.assertInDump("alpha.py", dump)
             self.assertNotInDump("charlie.js", dump)
             self.assertTrue(out.exists())
@@ -160,7 +190,7 @@ class CommentStrippingTests(GhConcatBaseTest):
 
 
 class RangeTests(GhConcatBaseTest):
-    """Line-range slicing flags."""
+    """Line‑range slicing flags."""
 
     def test_range_n(self) -> None:
         dump = _run(["-g", "py", "-n", "10", "-a", "src/module/large.py"])
@@ -174,13 +204,21 @@ class RangeTests(GhConcatBaseTest):
         lines = dump.splitlines()
         self.assertTrue(lines[1].startswith("# line 1"))
         numbered = [l for l in lines if l.startswith("# line ")]
-        self.assertEqual(len(numbered), 6)
+        self.assertEqual(len(numbered), 51)  # 1 (header) + 50 sliced lines
+
+    def test_range_N_only(self) -> None:
+        """With only -N, dump must start exactly at that absolute line."""
+        dump = _run(["-g", "py", "-N", "5", "-a", "src/module/large.py"])
+
+        # Activa modo multilínea con (?m)
+        self.assertRegex(dump, r"(?m)^# line 5$", "line 5 missing")
+        self.assertNotRegex(dump, r"(?m)^# line 4$", "line 4 should be excluded")
 
 
 class RouteAndBlankTests(GhConcatBaseTest):
 
     def test_route_only(self) -> None:
-        dump = _run(["-g", "py", "-t", "-a", "src/module/alpha.py"])
+        dump = _run(["-g", "py", "-l", "-a", "src/module/alpha.py"])
         self.assertNotIn("def alpha", dump)
 
     def test_keep_blank(self) -> None:
@@ -196,8 +234,8 @@ class FilterTests(GhConcatBaseTest):
         self.assertNotInDump("charlie.js", dump)
         self.assertInDump("alpha.py", dump)
 
-    def test_add_ext(self) -> None:
-        dump = _run(["-g", "py", "-k", ".go", "-a", "extra"])
+    def test_additional_extension(self) -> None:
+        dump = _run(["-g", "py", "-g", "go", "-a", "extra"])
         self.assertInDump("sample.go", dump)
 
 
@@ -229,24 +267,24 @@ class DirectiveFileTests(GhConcatBaseTest):
         self.assertInDump("alpha.py", dump)
 
 
-class IAIntegrationTests(GhConcatBaseTest):
+class AIIntegrationTests(GhConcatBaseTest):
 
-    def test_ia_prompt_and_wrap(self) -> None:
+    def test_ai_template_and_wrap(self) -> None:
         with tempfile.TemporaryDirectory() as td, \
-                patch("ghconcat.src.ghconcat._call_openai") as dummy_call, \
+                patch.object(ghconcat, "_call_openai") as dummy_call, \
                 patch.dict(os.environ, {"OPENAI_API_KEY": "dummy"}):
             out = Path(td) / "ia_output.txt"
             _run([
                 "-g", "py",
-                "--ia-prompt", "ia_template.txt",
-                "--ia-output", str(out),
-                "--ia-wrap", "python",
+                "--template", "ia_template.txt",
+                "--ai",
+                "-W", "python",
+                "-o", str(out),
                 "-a", "src/module/alpha.py"
             ])
             dummy_call.assert_called_once()
-            inp = FIXTURES / "ia_template.inputtxt"
-            self.assertTrue(inp.exists())
-            self.assertIn("```python", inp.read_text(encoding="utf-8"))
+            prompt_sent = dummy_call.call_args.args[0]  # first positional arg
+            self.assertIn("```python", prompt_sent)
 
 
 class WorkspaceRootTests(GhConcatBaseTest):
@@ -272,84 +310,67 @@ class UpgradeFlagTests(GhConcatBaseTest):
             called.append(True)
             raise SystemExit(0)
 
-        with patch.object(ghconcat, "_perform_upgrade", fake_upgrade):
+        import importlib
+        pkg = importlib.import_module("ghconcat")  # top-level package
+
+        with patch.object(pkg, "_perform_upgrade", fake_upgrade):
             with self.assertRaises(SystemExit):
-                GhConcat.run(["-g", "py", "--upgrade"])
+                GhConcat.run(["--upgrade"])
+
         self.assertTrue(called and called[0])
 
 
-class ExtraEdgeCaseTests(unittest.TestCase):
-    """Group of additional test‑cases that validate uncovered edge scenarios."""
+class ExtraEdgeCaseTests(GhConcatBaseTest):
+    """Additional corner‑cases."""
 
-    # ---------- PATH COVERAGE ---------- #
     def test_unknown_extension_inclusion(self) -> None:
-        """A custom extension token (``fooext``) must activate ``.fooext`` files."""
-        dump = _run(["--lang", "fooext", "-a", "extra"])
+        dump = _run(["-g", "fooext", "-a", "extra"])
         self.assertIn("sample.fooext", dump)
 
     def test_generated_dart_is_ignored(self) -> None:
-        """Files ending in ``.g.dart`` must never appear in the dump."""
         dump = _run(["-g", "dart", "-a", "build"])
         self.assertNotIn("ignore.g.dart", dump)
 
     def test_only_comments_file_is_skipped(self) -> None:
-        """
-        A file containing only comments must be fully skipped once all
-        comments are removed with ``-C``.
-        """
         dump = _run(["-g", "py", "-C", "-a", "src/module/only_comments.py"])
-        # The header delimiter would reveal the file‑name; it must be absent.
         self.assertNotIn("only_comments.py", dump)
 
-    # ---------- RANGE HANDLING ---------- #
-    def test_range_N_only(self) -> None:
-        """Providing only ``-N`` should return the first ``END‑1`` lines."""
-        dump = _run(["-g", "py", "-N", "5", "-a", "src/module/large.py"])
-        # Expect: header + 4 data lines ⇒ exactly 5 newline (splitlines len -1)
-        self.assertEqual(dump.count("\n"), 5)
-
-    # ---------- ROUTE / HEADER ---------- #
     def test_route_only_keeps_header(self) -> None:
-        """When using ``-t`` ghconcat must output the header delimiter."""
-        dump = _run(["-g", "js", "-t", "-a", "src/module/charlie.js"])
-        self.assertIn("===== ", dump)  # header present
-        self.assertNotIn("export function", dump)  # body absent
+        dump = _run(["-g", "js", "-l", "-a", "src/module/charlie.js"])
+        self.assertIn("===== ", dump)
+        self.assertNotIn("export function", dump)
 
-    # ---------- EXCLUSION LOGIC ---------- #
     def test_absolute_exclude_dir(self) -> None:
-        """An absolute path passed to ``-E`` must exclude the directory."""
         abs_dir = FIXTURES / "exclude_me"
         dump = _run(["-g", "py", "-a", ".", "-E", str(abs_dir)])
         self.assertNotIn("ignored.py", dump)
 
-    # ---------- ERROR CONDITIONS ---------- #
     def test_skip_all_languages_fails(self) -> None:
-        """After applying ``--skip-lang`` ghconcat must abort when no ext remains."""
         with self.assertRaises(SystemExit):
             _run(["-g", "py", "-G", "py", "-a", "src"])
 
 
 class CrossDirectiveCombinationTest(unittest.TestCase):
-    """Escenario único de alta cobertura combinando 3×-x y 3×-X."""
+    """High‑coverage scenario combining 3×‑X batch + inline."""
 
     @classmethod
     def setUpClass(cls) -> None:
         if not FIXTURES.exists():
-            raise RuntimeError("Fixture tree missing. Run full_fixtures.sh primero.")
+            raise RuntimeError("Fixture tree missing. Run full_fixtures.sh first.")
         _ensure_directive_fixtures()
 
     def test_multi_level_directives(self) -> None:
-        """Valida la salida combinada de 3 -x y 3 -X con overrides."""
+        """Validate combined output of 3 -X files (inline + batch)."""
         cli: List[str] = ["-g", "py", "-r", "."]
+        # Inline directives are now processed via -X (level > 0)
         for xf in INLINE_FILES:
-            cli += ["-x", xf]
+            cli += ["-X", xf]
         for bf in BATCH_FILES:
             cli += ["-X", bf]
         cli += ["-a", "src/module/alpha.py"]
 
         dump = _run(cli)
 
-        # ------ presencia de todos los archivos ------
         expected = [
             "alpha.py",
             "charlie.js",
@@ -363,31 +384,111 @@ class CrossDirectiveCombinationTest(unittest.TestCase):
             with self.subTest(file=fname):
                 self.assertIn(fname, dump)
 
-        # ------ slicing charlie.js (-n 1 -N 2 -i) ------
+        # slicing charlie.js (inline1.gcx)
         charlie_seg = _extract_segment(dump, "charlie.js")
-        self.assertIn("// simple comment", charlie_seg)  # import fue removido
+        self.assertIn("// simple comment", charlie_seg)
         self.assertNotIn("export function charlie", charlie_seg)
 
-        # ------ slicing omega.xml (-n 2) ------
+        # slicing omega.xml (inline2.gcx)
         omega_seg = _extract_segment(dump, "omega.xml")
         self.assertIn("<root>", omega_seg)
         self.assertNotIn("</root>", omega_seg)
 
-        # ------ slicing beta.py (-n 1 -N 3) ------
+        # slicing beta.py (batch1.gcx)
         beta_seg = _extract_segment(dump, "beta.py")
-        self.assertIn("def beta()", beta_seg)
-        self.assertNotIn("return 2", beta_seg)
+        self.assertIn("return 2", beta_seg)
+        self.assertNotIn("def beta()", beta_seg)
 
-        # ------ número de encabezados ------
+        # header count = one per file
         header_count = dump.count(HEADER_DELIM)
-        self.assertEqual(header_count, len(expected) * 2)  # dos ocurrencias por archivo
+        self.assertEqual(header_count, len(expected) * 2)
 
 
 # --------------------------------------------------------------------------- #
-#  Entry-point                                                               #
+#  NEW TESTS – extra coverage                                                 #
+# --------------------------------------------------------------------------- #
+class HeaderSemanticsTests(GhConcatBaseTest):
+    def test_H_ignored_when_N1(self) -> None:
+        dump = _run(["-g", "py", "-N", "1", "-H", "-a", "src/module/large.py"])
+        self.assertEqual(dump.splitlines()[1], "# line 1")  # no duplicado
+
+    def test_H_plus_N_and_n(self) -> None:
+        dump = _run(["-g", "py", "-H", "-N", "40", "-n", "10",
+                     "-a", "src/module/large.py"])
+        lines = [l for l in dump.splitlines() if l.startswith("# line ")]
+        self.assertEqual(lines[0], "# line 1")
+        self.assertEqual(lines[1], "# line 40")
+        self.assertEqual(len(lines), 11)  # 1 + 10
+
+
+class AliasEnvTemplateTests(GhConcatBaseTest):
+    def test_alias_and_env_interpolation(self) -> None:
+        tpl = FIXTURES / "tpl.md"
+        tpl.write_text("**{project}**\nPY:{py}\nGO:{go}\n", encoding="utf-8")
+        (FIXTURES / "py.gcx").write_text("-a src/module/alpha.py\n-g py\n-A py\n",
+                                         encoding="utf-8")
+        (FIXTURES / "go.gcx").write_text("-a extra/sample.go\n-g go\n-A go\n",
+                                         encoding="utf-8")
+
+        dump = _run(["--template", str(tpl), "-V", "project=Demo",
+                     "-X", "py.gcx", "-X", "go.gcx"])
+        self.assertIn("**Demo**", dump)
+        self.assertIn("def alpha()", dump)
+        self.assertIn("package main", dump)
+
+    def test_invalid_env_pair_fails(self) -> None:
+        with self.assertRaises(SystemExit):
+            _run(["-g", "py", "-V", "malformed", "-a", "src/module/alpha.py"])
+
+
+class WrapBehaviourTests(GhConcatBaseTest):
+    def test_wrap_without_body(self) -> None:
+        dump = _run(["-g", "js", "-l", "-W", "js",
+                     "-a", "src/module/charlie.js"])
+        self.assertNotIn("```", dump)
+
+    def test_wrap_content(self) -> None:
+        dump = _run(["-g", "js", "-W", "javascript",
+                     "-a", "src/module/charlie.js"])
+        self.assertIn("```javascript", dump)
+        self.assertTrue(dump.strip().endswith("```"))
+
+
+class ErrorScenarioTests(GhConcatBaseTest):
+    def test_multiple_x_rejected(self) -> None:
+        (FIXTURES / "x1.gcx").write_text("-g py\n-a src/module", encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            _run(["-x", "x1.gcx", "-x", "x1.gcx"])
+
+    def test_mixing_args_with_x_rejected(self) -> None:
+        (FIXTURES / "x2.gcx").write_text("-g py\n-a src/module", encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            _run(["-x", "x2.gcx", "-g", "py"])
+
+    def test_forbidden_flag_in_X(self) -> None:
+        (FIXTURES / "bad.gcx").write_text("-g py\n--ai\n", encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            _run(["-g", "py", "-X", "bad.gcx"])
+
+    def test_upgrade_with_extra_args_fails(self) -> None:
+        with self.assertRaises(SystemExit):
+            GhConcat.run(["--upgrade", "-g", "py"])
+
+
+class DefaultOutputDerivationTests(GhConcatBaseTest):
+    def test_template_sets_default_output_name(self) -> None:
+        tpl = FIXTURES / "dummy.tpl"
+        tpl.write_text("{dump_data}", encoding="utf-8")
+        _run(["-g", "py", "-a", "src/module/alpha.py", "--template", str(tpl)])
+        out = FIXTURES / "dummy.out.tpl"
+        self.assertTrue(out.exists())
+
+
+# --------------------------------------------------------------------------- #
+#  Entry‑point                                                                #
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
-    # Ensure a clean dump file between runs
+    # Clean dump file between runs
     if DUMP.exists():
         try:
             DUMP.unlink()
