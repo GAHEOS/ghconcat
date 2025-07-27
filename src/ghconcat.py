@@ -3,15 +3,22 @@
 ghconcat – universal source‑code concatenator
 ============================================
 
-Production release – 2025‑07‑27
---------------------------------
+Production release – 2025‑07‑27 ( patch 1 )
+-------------------------------------------
+* **Fixes**
+  - **Single wrap fencing**: solved the bug that generated nested
+    ```LANG blocks when using ``‑u/‑‑wrap``.
+    Now each chunk is fenced exactly once.
+
 * **Default inclusions**
   - If **‑g/‑‑include‑lang** is omitted, *all* extensions are accepted.
   - If **‑a/‑‑add‑path** is omitted, “.” (current dir) is assumed.
 
 * **Output policy**
-  - **Level 0**: **‑o/‑‑output is mandatory**; there is no fallback to *dump.txt*.
-  - **Nested ‑X** contexts never write a file **unless ‑o is given explicitly**.
+  - **Level 0**: **‑o/‑‑output is mandatory**; there is no fallback to
+    *dump.txt*.
+  - **Nested ‑X** contexts never write a file **unless ‑o is given
+    explicitly**.
 
 * **Context constraints**
   - Inside an **‑X** you must provide at least one of:
@@ -20,26 +27,28 @@ Production release – 2025‑07‑27
       3. Vars with **‑K**
     otherwise the run aborts.
   - **‑k/‑‑alias** stores the concat result in memory for *all* levels.
-  - **‑K/‑‑env** requires “VAR=VAL” syntax and is available to every template.
+  - **‑K/‑‑env** requires “VAR=VAL” syntax and is available to every
+    template.
 
 * **AI integration**
-  - **‑Q/‑‑ai** demands **‑o** (an output path where the reply will be stored).
+  - **‑Q/‑‑ai** demands **‑o** (an output path where the reply will be
+    stored).
 
-* **Header path policy (NEW)**
+* **Header path policy**
   - **Relative** to execution root by default.
   - Use **‑p/‑‑absolute‑path** to force absolute paths.
 
 * **Filters & pruning order**
   1. Include roots (‑a)
-  2. Walk trees, then apply ‑g/‑G/‑S/‑e/**E**
+  2. Walk trees, then apply ‑g/‑G/‑S/‑e/‑E
   3. Dispatch each file by extension
   4. Add single‑file roots (‑a FILE)
   5. Slice with ‑n/‑N/‑H
   6. Clean with ‑c/‑C/‑s/‑i/‑I
   7. Empty bodies are skipped (path is printed only with ‑l)
 
-This file is self‑contained, production‑ready and 100% compliant with the user’s
-development standards (PEP8, type hints, exhaustive docstrings).
+This file is self‑contained, production‑ready and 100 % compliant with
+PEP8, type hints and exhaustive English docstrings.
 """
 
 from __future__ import annotations
@@ -64,8 +73,9 @@ PRESETS: dict[str, set[str]] = {
     "odoo": {".py", ".xml", ".js", ".csv"},
 }
 
-_COMMENT_RULES: dict[str, Tuple[re.Pattern, re.Pattern,
-Optional[re.Pattern], Optional[re.Pattern]]] = {
+_COMMENT_RULES: dict[str, Tuple[
+    re.Pattern, re.Pattern, Optional[re.Pattern], Optional[re.Pattern]
+]] = {
     ".py": (
         re.compile(r"^\s*#(?!#).*$"),
         re.compile(r"^\s*#.*$"),
@@ -584,23 +594,25 @@ def _slice_raw(
     return selected
 
 
-def _concat(                  # noqa: C901
+def _concat(  # noqa: C901
         files: List[Path],
         ns: argparse.Namespace,
         wrapped: Optional[List[Tuple[str, str]]] = None,
         header_root: Optional[Path] = None,
 ) -> str:
     """
-    Build the concatenated *dump* applying clean-ups, slicing and wrapping.
+    Build the concatenated *dump* applying clean‑ups, slicing and wrapping.
 
     Behaviour
     ---------
-    1. With “-l/--list” only headers are emitted.
+    1. With “‑l/‑‑list” only headers are emitted.
     2. Empty bodies are skipped entirely (except with -l).
     3. Each header line is always *preceded* by a newline when the previous
        chunk did not finish with one, preventing “}=====” artefacts.
-    4. When wrapping is enabled every preserved body is fenced independently
-       and stored in *wrapped* for later use inside templates.
+    4. When wrapping is enabled every preserved body is **stored raw**
+       (without fences) in *wrapped*.
+       The single set of ```LANG fences is added later inside
+       `_execute_single`, avoiding nested blocks.
     """
     pieces: List[str] = []
     base_root = header_root or Path.cwd()
@@ -615,7 +627,7 @@ def _concat(                  # noqa: C901
             raw_lines, ns.first_line, ns.total_lines, ns.keep_header
         )
 
-        # ── Clean-ups ───────────────────────────────────────────────────
+        # ── Clean‑ups ───────────────────────────────────────────────────
         cleaned = _clean_lines(
             slice_raw,
             ext,
@@ -657,10 +669,7 @@ def _concat(                  # noqa: C901
 
         # ── Optional wrapping for templates ────────────────────────────
         if wrapped is not None:
-            lang = ns.wrap_lang or ext.lstrip(".")
-            wrapped.append(
-                (header_path, f"```{lang}\n{body.rstrip()}\n```")
-            )
+            wrapped.append((header_path, body.rstrip()))
 
     return "".join(pieces)
 
@@ -803,6 +812,8 @@ def _execute_single(
 
     wrapped_chunks: Optional[List[Tuple[str, str]]] = [] if ns.wrap_lang else None
     raw_dump = _concat(files, ns, wrapped_chunks, header_root=root)
+
+    # ── Wrap final output if requested ──────────────────────────────────
     if ns.wrap_lang and wrapped_chunks:
         wrap_lang = ns.wrap_lang
         fenced = [
