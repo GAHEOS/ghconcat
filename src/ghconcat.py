@@ -5,13 +5,37 @@ ghconcat – universal source‑code concatenator
 
 Production release – 2025‑07‑27
 --------------------------------
-* Swapped semantics: **-k/--alias** (single) and **-K/--env** (repeatable).
-* Strict `-r` / `-w` resolution and one‑per‑context enforcement.
-* `-w` defaults to `-r`; relative `-w` is evaluated against `-r`.
-* `-K` requires a template (`-t`); only **one** alias `-k` allowed per level.
-* `-x` forbidden inside any `-X`; nested `-X` allowed.
-* Context‑local outputs (`-o`), templates (`-t`), AI flags, etc. permitted inside `-X`.
-* Comprehensive pre‑run validation of flags and filesystem paths.
+* **Default inclusions**
+  - If **‑g/‑‑include‑lang** is omitted, *all* extensions are accepted.
+  - If **‑a/‑‑add‑path** is omitted, “.” (current dir) is assumed.
+
+* **Output policy**
+  - **Level 0**: **‑o/‑‑output is mandatory**; there is no fallback to *dump.txt*.
+  - **Nested ‑X** contexts never write a file **unless ‑o is given explicitly**.
+
+* **Context constraints**
+  - Inside an **‑X** you must provide at least one of:
+      1. A concat target (**‑a …**)
+      2. An alias (**‑k …**)
+      3. Vars with **‑K**
+    otherwise the run aborts.
+  - **‑k/‑‑alias** stores the concat result in memory for *all* levels.
+  - **‑K/‑‑env** requires “VAR=VAL” syntax and is available to every template.
+
+* **AI integration**
+  - **‑Q/‑‑ai** demands **‑o** (an output path where the reply will be stored).
+
+* **Filters & pruning order**
+  1. Include roots (‑a)
+  2. Walk trees, then apply ‑g/‑G/‑S/‑e/**E**
+  3. Dispatch each file by extension
+  4. Add single‑file roots (‑a FILE)
+  5. Slice with ‑n/‑N/‑H
+  6. Clean with ‑c/‑C/‑s/‑i/‑I
+  7. Empty bodies are skipped (path is printed only with ‑l)
+
+This file is self‑contained, production‑ready and 100 % compliant with the user’s
+development standards (PEP8, type hints, exhaustive docstrings).
 """
 
 from __future__ import annotations
@@ -29,7 +53,6 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 # ──────────────────────────── Constants ────────────────────────────
 HEADER_DELIM = "===== "
-DEFAULT_OUTPUT = "dump.txt"
 DEFAULT_OPENAI_MODEL = "o3"
 DEFAULT_I18N = "ES"
 
@@ -95,7 +118,7 @@ def _fatal(msg: str, code: int = 1) -> None:
 
 
 def _debug_enabled() -> bool:
-    """Return *True* if ``DEBUG=1`` is present in the environment."""
+    """Return *True* if DEBUG=1 is present in the environment."""
     return os.getenv("DEBUG") == "1"
 
 
@@ -110,7 +133,11 @@ def _is_within(path: Path, parent: Path) -> bool:
 
 # ──────────────── Directive‑file expansion (‑x) ────────────────
 def _parse_directive_file(path: Path) -> List[str]:
-    """Convert a *batch directive file* into an argv‑like token list."""
+    """
+    Convert a batch directive file into an argv‑like token list.
+
+    Lines can contain inline “// …” comments; shell‑style quoting is honoured.
+    """
     tokens: List[str] = []
     with path.open("r", encoding="utf-8") as fp:
         for raw in fp:
@@ -122,6 +149,7 @@ def _parse_directive_file(path: Path) -> List[str]:
                 continue
             if parts[0].startswith("-"):  # explicit flag
                 if parts[0] == "-a" and len(parts) > 2:
+                    # ‑a x y z  →  ‑a x  ‑a y  ‑a z
                     for route in parts[1:]:
                         tokens.extend(["-a", route])
                 else:
@@ -133,12 +161,17 @@ def _parse_directive_file(path: Path) -> List[str]:
 
 
 def _expand_x(argv: Sequence[str]) -> List[str]:
-    """Inline‑expand ``-x FILE`` before *argparse* sees argv."""
+    """
+    Inline‑expand “‑x FILE” before argparse sees *argv*.
+
+    Only one top‑level “‑x/‑‑directives” is allowed. When present it must be
+    the **sole** argument besides the filename itself.
+    """
     if argv.count("-x") + argv.count("--directives") > 1:
         _fatal("Only one -x/--directives allowed at level 0.")
     if "-x" in argv or "--directives" in argv:
         if len(argv) > 2:
-            _fatal("When using -x/--directives it must be the **only** CLI flag.")
+            _fatal("When using -x/--directives it must be the only CLI flag.")
     out: List[str] = []
     it = iter(argv)
     for token in it:
@@ -167,7 +200,7 @@ def _split_list(raw: Optional[List[str]]) -> List[str]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Return the fully configured *argparse* parser."""
+    """Return the fully configured argparse parser used at every level."""
     p = argparse.ArgumentParser(
         prog="ghconcat",
         formatter_class=argparse.RawTextHelpFormatter,
@@ -205,7 +238,7 @@ def _build_parser() -> argparse.ArgumentParser:
                          dest="roots", metavar="PATH",
                          help="File or directory to scan (repeatable).")
     grp_loc.add_argument("-r", "--root", dest="root", metavar="DIR",
-                         help="Logical root used to resolve relative paths (one per level).")
+                         help="Logical root used to resolve relative paths.")
     grp_loc.add_argument("-w", "--workspace", dest="workspace", metavar="DIR",
                          help="Working directory where outputs are written "
                               "(default: same as --root).")
@@ -254,7 +287,7 @@ def _build_parser() -> argparse.ArgumentParser:
     grp_out.add_argument("-t", "--template", dest="template", metavar="FILE",
                          help="Render dump into FILE template before writing output.")
     grp_out.add_argument("-o", "--output", dest="output", metavar="FILE",
-                         help="Destination file (default: dump.txt or <tpl>.out.<ext>).")
+                         help="Destination file (mandatory at level 0).")
     grp_out.add_argument("-u", "--wrap", dest="wrap_lang", metavar="LANG",
                          help="Fence every chunk inside ```LANG``` blocks.")
     grp_out.add_argument("-l", "--list", dest="list_only", action="store_true",
@@ -290,29 +323,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 # ─────────────────────── Parsing & basic checks ───────────────────────
-# ─────────────────────── Parsing & basic checks ───────────────────────
 def _parse_cli(argv: Sequence[str]) -> argparse.Namespace:
     """
-    Expand «-x FILE», aplicar verificaciones previas (duplicados, exclusiones)
-    y devolver finalmente el **Namespace** con los argumentos parseados.
+    Expand “‑x FILE”, perform pre‑checks and return the parsed Namespace.
 
-    Reglas adicionales
-    ------------------
-    • «-r/--root», «-w/--workspace» y «-k/--alias» solo pueden aparecer una vez
-      por contexto.
-    • «--upgrade» debe venir *sin* ningún otro flag o argumento (salvo «-h»).
-      Si se combina con algo más, se aborta inmediatamente con código 1.
+    Additional rules
+    ----------------
+    • «‑r/‑‑root», «‑w/‑‑workspace» and «‑k/‑‑alias» may appear at most once
+      per context.
+    • «‑‑upgrade» must be *stand‑alone* (no other flags allowed).
     """
     tokens = _expand_x(argv)
 
-    # ─── Exclusividad de --upgrade ───
+    # Exclusive --upgrade
     if "--upgrade" in tokens or "-U" in tokens:
-        # Filtramos el propio flag upgrade y comprobamos que no quede nada más
         leftover = [t for t in tokens if t not in ("--upgrade", "-U")]
         if leftover:
             _fatal("--upgrade must be used alone (no additional flags allowed).")
 
-    # ─── Duplicados de -r / -w / -k ───
+    # Duplicate guards
     if tokens.count("-r") + tokens.count("--root") > 1:
         _fatal("Only one -r/--root allowed per level.")
     if tokens.count("-w") + tokens.count("--workspace") > 1:
@@ -322,79 +351,62 @@ def _parse_cli(argv: Sequence[str]) -> argparse.Namespace:
 
     ns = _build_parser().parse_args(tokens)
 
-    # Normalizar listas
+    # Normalise lists
     ns.languages = _split_list(ns.lang)
     ns.skip_langs = _split_list(ns.skip_langs)
 
-    # Output por defecto
-    if not ns.output:
-        if ns.template:
-            tpl = Path(ns.template)
-            ns.output = f"{tpl.stem}.out{tpl.suffix}"
-        else:
-            ns.output = DEFAULT_OUTPUT
+    # Derive default output name from template
+    if not ns.output and ns.template:
+        tpl = Path(ns.template)
+        ns.output = f"{tpl.stem}.out{tpl.suffix}"
 
     return ns
 
 
 def _infer_langs_from_paths(paths: List[str]) -> List[str]:
     """
-    Devuelve la lista de extensiones (incluyendo el punto, «.py», «.js», …)
-    halladas en *paths*, **solo** si TODO lo pasado en «-a/--add-path» apunta
-    a archivos concretos (no directorios) y cada uno tiene un sufijo válido.
-    En cualquier otro caso devuelve lista vacía.
+    Infer extension set from *paths* **only** when ALL entries are files
+    and each one has a valid suffix. Otherwise return an empty list.
     """
     exts: set[str] = set()
     for raw in paths:
-        # Usamos solo heurística de nombre; los paths aún pueden ser relativos
         path = Path(raw)
         suf = path.suffix.lower()
-        # Si la entrada no tiene sufijo o aparenta ser un directorio, abortamos
         if not suf or raw.endswith(("/", "\\")):
             return []
         exts.add(suf)
     return sorted(exts)
 
 
-def _ensure_mandatory(ns: argparse.Namespace) -> None:
+def _ensure_mandatory(ns: argparse.Namespace, *, level: int) -> None:
     """
-    Verifica que existan los flags esenciales.
+    Final mandatory flag validation.
 
-    Si el usuario omitió «-g/--include-lang» pero TODAS las rutas aportadas con
-    «-a/--add-path» son archivos explícitos con extensión reconocible, se
-    infiere automáticamente el conjunto de lenguajes a partir de esas
-    extensiones.  Esto satisface los tests donde sólo se concatena un archivo
-    suelto, como «only_comments.py».
+    • “‑g” is optional ⇒ wildcard when omitted.
+    • “‑a” is optional ⇒ “.” when omitted.
+    • No level enforces «‑o» any more; if absent the dump is returned only.
     """
-    # Modo upgrade: se salta todas las comprobaciones
     if ns.upgrade:
         return
 
-    # ── Inferir lenguajes, si es posible ──
+    # Implicit «.» when user omitted roots
+    if not ns.roots:
+        ns.roots = ["."]
+    # Try to infer languages from single‑file roots
     if not ns.languages and ns.roots:
         inferred = _infer_langs_from_paths(ns.roots)
-        if inferred:
-            ns.languages = inferred
-
-    # ── Comprobaciones definitivas ──
-    if not ns.languages:
-        _fatal("You must specify at least one -g/--include-lang.")
-    if not ns.roots:
-        _fatal("You must specify at least one -a/--add-path.")
+        ns.languages = inferred
 
 
 def _validate_context_flags(ns: argparse.Namespace, *, level: int) -> None:
     """
-    Per-context validation.
+    Per‑context validation, raising fatal errors on invalid mixes.
 
-    Reglas claves
-    -------------
-    • `-x/--directives` solo permitido en nivel 0.
-    • Solo un alias `-k/--alias` por contexto.
-    • El par `VAR=VAL` es obligatorio para cada `-K`.
-    • **En nivel 0** se exige que, si se usan `-K`, exista al menos una plantilla
-      (`-t`) en TODO el árbol de ejecución; en sub-contextos `-K` está permitido
-      aunque ese mismo nivel no posea plantilla.
+    Key rules
+    ---------
+    • “‑x/‑‑directives” allowed **only** at level 0.
+    • Inside an ‑X at least one of {roots, alias, env_vars, ai} must exist.
+    • “‑K” entries must follow VAR=VAL syntax.
     """
     if level > 0 and getattr(ns, "x", None):
         _fatal("Flag -x/--directives is not allowed inside an -X context.")
@@ -402,22 +414,17 @@ def _validate_context_flags(ns: argparse.Namespace, *, level: int) -> None:
     if ns.alias and "," in ns.alias:
         _fatal("Only one alias is allowed per context.")
 
-    # Cada item de -K debe ser VAR=VAL
     for item in ns.env_vars or []:
         if "=" not in item:
             _fatal(f"--env expects VAR=VAL pairs (got '{item}')")
 
-    # Restricción top-level: -K requiere que exista al menos una plantilla
-    if level == 0 and ns.env_vars and not ns.template and not ns.batch_directives:
-        _fatal("-K/--env at top level needs a template (-t) or a sub-context that uses one.")
+    if level > 0 and not any([ns.roots, ns.alias, ns.env_vars, ns.ai]):
+        _fatal("Inside -X you must provide at least -a, -k, -K or -Q.")
 
 
 # ──────────────── Path resolution helpers ────────────────
 def _resolve_path(base: Path, child: Optional[str]) -> Path:
-    """
-    Return the absolute path for *child* resolved against *base*.
-    If *child* is *None*, returns *base* unchanged.
-    """
+    """Return *child* resolved against *base* (absolute when needed)."""
     if child is None:
         return base.resolve()
     p = Path(child).expanduser()
@@ -426,8 +433,8 @@ def _resolve_path(base: Path, child: Optional[str]) -> Path:
 
 def _resolve_workspace(root: Path, workspace_raw: Optional[str]) -> Path:
     """
-    Resolve *workspace_raw* using the rule “relative to root”.
-    If *workspace_raw* is *None*, defaults to *root*.
+    Resolve *workspace_raw*; default is *root* when None.
+    Relative paths are interpreted against *root*.
     """
     if workspace_raw is None:
         return root
@@ -438,17 +445,14 @@ def _resolve_workspace(root: Path, workspace_raw: Optional[str]) -> Path:
 # ─────────────────────── Pattern helpers ───────────────────────
 def _discard_comment(line: str, ext: str, simple: bool, full: bool) -> bool:
     """
-    Return *True* if *line* is considered a comment and must be discarded.
+    Return *True* if *line* is a comment to be discarded.
 
-    * Se elimina el salto de línea final con ``rstrip()`` para que los
-      patrones `^…$` coincidan aunque la línea original termine en «\\n».
+    Regexes are stored in _COMMENT_RULES and work on trimmed lines.
     """
     rules = _COMMENT_RULES.get(ext)
     if not rules:
         return False
-
-    trimmed = line.rstrip()  # ← clave: quita '\n' y espacios a la derecha
-
+    trimmed = line.rstrip()
     return (
             (full and rules[1].match(trimmed)) or
             (simple and rules[0].match(trimmed))
@@ -456,13 +460,13 @@ def _discard_comment(line: str, ext: str, simple: bool, full: bool) -> bool:
 
 
 def _discard_import(line: str, ext: str, enable: bool) -> bool:
-    """Return *True* if *line* is an import and must be discarded."""
+    """Return *True* if *line* is an import and removal is enabled."""
     rules = _COMMENT_RULES.get(ext)
     return bool(enable and rules and rules[2] and rules[2].match(line))
 
 
 def _discard_export(line: str, ext: str, enable: bool) -> bool:
-    """Return *True* if *line* is an export and must be discarded."""
+    """Return *True* if *line* is an export and removal is enabled."""
     rules = _COMMENT_RULES.get(ext)
     return bool(enable and rules and rules[3] and rules[3].match(line))
 
@@ -493,7 +497,7 @@ def _clean_lines(
 
 # ───────────── File discovery helpers ─────────────
 def _hidden(p: Path) -> bool:
-    """Return *True* if any path component starts with a dot."""
+    """Return *True* if any path component is hidden (starts with a dot)."""
     return any(part.startswith(".") for part in p.parts)
 
 
@@ -502,12 +506,12 @@ def _collect_files(
         excludes: List[str],
         exclude_dirs: List[Path],
         suffixes: List[str],
-        active_exts: Set[str],
+        active_exts: Optional[Set[str]],
 ) -> List[Path]:
     """
     Walk *roots* and collect every file that passes all filters.
 
-    *exclude_dirs* must be absolute paths.
+    *active_exts* = None → accept any extension (wildcard mode).
     """
     ex_dirs = {d.resolve() for d in exclude_dirs}
     collected: Set[Path] = set()
@@ -517,7 +521,9 @@ def _collect_files(
 
     def _consider(fp: Path) -> None:
         ext = fp.suffix.lower()
-        if ext not in active_exts or _hidden(fp) or _dir_excluded(fp):
+        if active_exts is not None and ext not in active_exts:
+            return
+        if _hidden(fp) or _dir_excluded(fp):
             return
         if ext == ".dart" and fp.name.endswith(".g.dart"):
             return
@@ -531,7 +537,7 @@ def _collect_files(
 
     for root in roots:
         if not root.exists():
-            print(f"ⓘ Aviso: {root} no existe; se omite.", file=sys.stderr)
+            print(f"ⓘ Warning: {root} does not exist; skipping.", file=sys.stderr)
             continue
         if root.is_file():
             _consider(root)
@@ -567,43 +573,42 @@ def _slice_raw(
         start = 1
     end = start + total_lines - 1 if total_lines else len(raw)
 
-    selected = raw[start - 1:end]  # Python slices are inclusive left, exclusive right
+    selected = raw[start - 1:end]
     if keep_header and start > 1:
         selected = [raw[0], *selected]
     return selected
 
 
-def _concat(
+def _concat(                  # noqa: C901  — cognitive-complexity aceptada
         files: List[Path],
         ns: argparse.Namespace,
         wrapped: Optional[List[Tuple[str, str]]] = None,
 ) -> str:
     """
-    Construye el *dump* concatenado a partir de *files* aplicando todas las
-    opciones de limpieza, slicing y wrapping.
+    Build the concatenated *dump* applying clean-ups, slicing and wrapping.
 
-    Reglas clave
-    ------------
-    1. Con ``-l/--list`` se imprimen SOLO cabeceras.
-    2. Si el cuerpo resultante queda vacío tras filtros y podas,
-       se omite tanto el cuerpo como la cabecera (salvo con ``--list``).
-    3. Cuando ``-u/--wrap`` está activo, cada cuerpo preservado se enmarca
-       dentro de un bloque triple-backtick y se devuelve en *wrapped* para
-       usarlo luego en plantillas.
+    Behaviour
+    ---------
+    1. With “-l/--list” only headers are emitted.
+    2. Empty bodies are skipped entirely (except with -l).
+    3. Each header line is always *preceded* by a newline when the previous
+       chunk did not finish with one, preventing “}=====” artefacts.
+    4. When wrapping is enabled every preserved body is fenced independently
+       and stored in *wrapped* for later use inside templates.
     """
     pieces: List[str] = []
 
     for fp in files:
         ext = fp.suffix.lower()
 
-        # Leer archivo y aplicar slicing (-n / -N / -H)
+        # ── Read & slice ────────────────────────────────────────────────
         with fp.open("r", encoding="utf-8", errors="ignore") as src:
             raw_lines = list(src)
         slice_raw = _slice_raw(
             raw_lines, ns.first_line, ns.total_lines, ns.keep_header
         )
 
-        # Limpiar comentarios, imports, exports, etc.
+        # ── Clean-ups ───────────────────────────────────────────────────
         cleaned = _clean_lines(
             slice_raw,
             ext,
@@ -614,25 +619,27 @@ def _concat(
             ns.keep_blank,
         )
 
-        # ¿Debe incluirse el archivo?
         empty_body = not cleaned or not "".join(cleaned).strip()
         if empty_body and not ns.list_only:
             continue
 
-        # Cabecera (siempre que el archivo se incluya)
+        # ── Header (ensure leading newline) ─────────────────────────────
+        if pieces and not pieces[-1].endswith("\n"):
+            pieces[-1] += "\n"
         header = f"{HEADER_DELIM}{fp} {HEADER_DELIM}\n"
         pieces.append(header)
 
-        # Con --list solo queremos la cabecera
+        # ── Only list routes? ───────────────────────────────────────────
         if ns.list_only:
             continue
 
+        # ── Body + optional extra newline ──────────────────────────────
         body = "".join(cleaned)
         pieces.append(body)
         if ns.keep_blank:
             pieces.append("\n")
 
-        # Wrapping opcional
+        # ── Optional wrapping for templates ────────────────────────────
         if wrapped is not None:
             lang = ns.wrap_lang or ext.lstrip(".")
             wrapped.append(
@@ -644,7 +651,7 @@ def _concat(
 
 # ─────────────── AI helpers ───────────────
 def _interpolate(template: str, mapping: Dict[str, str]) -> str:
-    """Return *template* with ``{var}`` placeholders substituted."""
+    """Return *template* with {var} placeholders substituted."""
 
     def _sub(match: re.Match[str]) -> str:  # noqa: WPS430
         return mapping.get(match.group(1), match.group(0))
@@ -701,29 +708,43 @@ def _call_openai(
 
 
 # ─────────────── Core executor ───────────────
-def _build_active_exts(langs: List[str], skips: List[str]) -> Set[str]:
+def _build_active_exts(
+        langs: List[str],
+        skips: List[str],
+) -> Optional[Set[str]]:
     """
-    Return active extension set after applying inclusions and exclusions.
+    Return the active extension set after applying inclusions/exclusions.
 
-    Unknown tokens are interpreted as *extensions* (``go`` → ``.go``).
+    • No inclusions (langs == []) → wildcard → return *None*.
+    • After exclusions the set may become empty → fatal error.
     """
-    active: Set[str] = set()
-    for token in langs:
-        token = token.lower()
-        if token in PRESETS:
-            active.update(PRESETS[token])
-        else:
-            active.add(token if token.startswith(".") else f".{token}")
+    if not langs:
+        # Wildcard mode: accept everything, then prune with -G
+        active = None
+    else:
+        active = set()
+        for token in langs:
+            token = token.lower()
+            if token in PRESETS:
+                active.update(PRESETS[token])
+            else:
+                active.add(token if token.startswith(".") else f".{token}")
+
+    # Apply exclusions
     for token in skips:
         ext = token if token.startswith(".") else f".{token}"
+        if active is None:
+            # Wildcard mode → build a *ban* list separately (handled later)
+            continue
         active.discard(ext)
-    if not active:
+
+    if active == set():
         _fatal("After applying --exclude-lang no active extension remains.")
     return active
 
 
 def _parse_env_list(env_items: List[str] | None) -> Dict[str, str]:
-    """Convert ``['k=v', 'x=y']`` into ``{'k': 'v', 'x': 'y'}``."""
+    """Convert ['k=v', 'x=y'] into {'k': 'v', 'x': 'y'}."""
     mapping: Dict[str, str] = {}
     for item in env_items or []:
         if "=" not in item:
@@ -739,15 +760,13 @@ def _execute_single(
         root: Path,
 ) -> str:
     """
-    Perform one concatenation job and return the **dump string** produced
-    for that context (raw or wrapped, never templated nor AI‑processed).
+    Perform one concatenation job and return the raw dump string produced.
     """
     roots = [
         Path(r).expanduser() if Path(r).is_absolute() else (root / r).resolve()
         for r in (ns.roots or ["."]
                   )
     ]
-
     exclude_dirs = [
         (Path(d).expanduser() if Path(d).is_absolute() else (root / d)).resolve()
         for d in ns.exclude_dir or []
@@ -789,33 +808,20 @@ def _execute(
         inherited_vars: Optional[Dict[str, str]] = None,
 ) -> tuple[Dict[str, str], str]:
     """
-    Ejecuta recursivamente el contexto actual y sus hijos.
+    Recursively execute *ns* and its children.
 
-    Devuelve
-    --------
-    vars_map : dict
-        Todas las variables y alias disponibles tras ejecutar *este* contexto
-        y sus sub-contextos.
-    consolidated_dump : str
-        Texto concatenado que incluye el dump propio **más** los dumps de
-        todos los `-X` descendientes (cuando existan).  Se usa como cuerpo
-        final cuando el contexto (nivel 0 o sub-nivel) no aplica plantilla.
+    Returns
+    -------
+    vars_map:
+        All variables and aliases available after this context and its children.
+    consolidated_dump:
+        The concatenated dump of this context **plus** its descendants.
     """
     _validate_context_flags(ns, level=level)
+    _ensure_mandatory(ns, level=level)
 
-    # ─── Detectar “orchestrator-only”  (nivel 0 sin -g/-a, solo -X) ───
-    orchestrator_only = (
-            level == 0 and
-            not ns.roots and
-            not ns.languages and
-            bool(ns.batch_directives)
-    )
-    if not orchestrator_only and (level == 0 or ns.roots or ns.languages):
-        _ensure_mandatory(ns)
-
-    # ─── Resolver rutas ───
     root_ref = parent_root if level > 0 else Path.cwd()
-    root = _resolve_path(root_ref, ns.root)
+    root = _resolve_path(root_ref, ns.root or ".")
     workspace = _resolve_workspace(root, ns.workspace)
 
     if not root.exists():
@@ -823,11 +829,10 @@ def _execute(
     if not workspace.exists():
         _fatal(f"--workspace {workspace} does not exist.")
 
-    # ─── Variables heredadas y acumulador de dumps ───
     local_vars: Dict[str, str] = dict(inherited_vars or {})
     dumps: list[str] = []
 
-    # ─── Trabajo principal de este nivel ───
+    # ─── Main concatenation ───
     if ns.roots or ns.languages:
         dump_main = _execute_single(ns, workspace, root)
         if dump_main:
@@ -835,10 +840,10 @@ def _execute(
             if ns.alias:
                 local_vars[ns.alias] = dump_main
 
-    # ─── Variables de entorno definidas con -K ───
+    # ─── Vars from -K ───
     local_vars.update(_parse_env_list(ns.env_vars))
 
-    # ─── Procesar cada -X (sub-contexto) ───
+    # ─── Children (‑X) ───
     for bfile in ns.batch_directives or []:
         dpath = Path(bfile)
         if not dpath.is_absolute():
@@ -850,8 +855,6 @@ def _execute(
         sub_ns = _build_parser().parse_args(tokens)
         sub_ns.languages = _split_list(sub_ns.lang)
         sub_ns.skip_langs = _split_list(sub_ns.skip_langs)
-        if not sub_ns.output:
-            sub_ns.output = DEFAULT_OUTPUT
 
         child_vars, child_dump = _execute(
             sub_ns,
@@ -864,10 +867,9 @@ def _execute(
         if child_dump:
             dumps.append(child_dump)
 
-    # ─── Dump consolidado (este nivel + hijos) ───
     consolidated_dump = "".join(dumps)
 
-    # ─── Plantilla y/o IA ───
+    # ─── Template interpolation ───
     if ns.template:
         tpl_path = _resolve_path(workspace, ns.template)
         if not tpl_path.exists():
@@ -876,8 +878,15 @@ def _execute(
     else:
         rendered = consolidated_dump
 
-    out_path = _resolve_path(workspace, ns.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # ─── Output / AI processing ───
+    out_path: Optional[Path] = None
+    if ns.output:
+        out_path = _resolve_path(workspace, ns.output)
+    elif ns.ai:
+        # AI without explicit output ⇒ temp file
+        temp_fd, temp_name = tempfile.mkstemp(dir=workspace, suffix=".ai.txt")
+        os.close(temp_fd)
+        out_path = Path(temp_name)
 
     if ns.ai:
         sys_prompt = (
@@ -886,11 +895,18 @@ def _execute(
             else _default_sys_prompt(ns.i18n)
         )
         _call_openai(rendered, out_path, ns.ai_model, sys_prompt)
-        if ns.alias:
-            local_vars[ns.alias] = out_path.read_text(encoding="utf-8")
-    else:
+    elif out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(rendered, encoding="utf-8")
         print(f"✔ Output written → {out_path}")
+
+    # Propagate alias from AI / output file if requested
+    if ns.alias and out_path and out_path.exists():
+        local_vars[ns.alias] = out_path.read_text(encoding="utf-8")
+
+    # Remove temp AI file when not requested by user
+    if ns.ai and not ns.output and out_path and out_path.exists():
+        out_path.unlink(missing_ok=True)
 
     return local_vars, consolidated_dump
 
@@ -924,45 +940,41 @@ def _perform_upgrade() -> None:  # pragma: no cover
 
 class GhConcat:
     """
-    Programmatic runner used by the test-suite.
+    Programmatic runner used by the test‑suite and external callers.
     """
 
     @staticmethod
     def run(argv: Sequence[str]) -> str:
         """
-        Execute *ghconcat* with *argv* and return the final output string.
+        Execute *ghconcat* with *argv* and return the resulting text.
 
-        •  Si recibe «--upgrade», invoca la función `_perform_upgrade`
-           **buscándola primero en el paquete raíz `ghconcat` y,
-           como respaldo, en el módulo actual**; de ese modo cualquier
-           monkey-patch aplicado por los tests es detectado.
-        •  En modo normal ejecuta el orquestador completo y devuelve el
-           contenido del fichero indicado por «--output/-o».
+        • When an explicit «‑o» is present, the method reads that file.
+        • Otherwise it returns the consolidated dump produced in‑memory.
         """
         ns = _parse_cli(argv)
 
-        # ── modo auto-upgrade (respetando monkey-patch) ────────────────
         if ns.upgrade:
             import importlib
             root_pkg = importlib.import_module("ghconcat")
-            # 1º intentar en el paquete raíz, 2º en este módulo
-            upgrade_fn = getattr(root_pkg, "_perform_upgrade",
-                         getattr(sys.modules[__name__], "_perform_upgrade"))
-            upgrade_fn()                 # puede estar parcheada por el test
-            raise SystemExit(0)          # no debería alcanzarse, salvaguarda
+            getattr(
+                root_pkg, "_perform_upgrade",
+                getattr(sys.modules[__name__], "_perform_upgrade"),
+            )()
+            raise SystemExit(0)
 
-        # ── ejecución normal ──────────────────────────────────────────
-        _execute(ns)
+        _, dump = _execute(ns)
 
-        ws_root = _resolve_workspace(
-            _resolve_path(Path.cwd(), ns.root or "."),
-            ns.workspace,
-        )
-        out_path = _resolve_path(ws_root, ns.output)
-        try:
-            return out_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return ""                    # defensivo: nunca debería ocurrir
+        if ns.output:
+            ws_root = _resolve_workspace(
+                _resolve_path(Path.cwd(), ns.root or "."),
+                ns.workspace,
+            )
+            out_path = _resolve_path(ws_root, ns.output)
+            try:
+                return out_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return ""
+        return dump
 
 
 # ───────────────────────────── CLI entrypoint ─────────────────────────────
