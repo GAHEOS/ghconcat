@@ -259,34 +259,112 @@ Flag inheritance:
 
 ## 8 · Recipes
 
+> All commands assume a Unix-like shell; adapt paths/quotes on Windows as needed.
+
 <details>
-<summary><strong>8.1 Story‑diff for Code‑Review</strong></summary>
+<summary><strong>8.1 Story-diff for Code-Review (relative headers)</strong></summary>
+
+Show the full historical context of a pull-request by comparing two dumps that
+use the **default relative headers**:
 
 ```bash
 # baseline (main)
 ghconcat -g odoo -C -i -a addons/sale -o /tmp/base.txt
 
-# PR branch
+# PR branch (checked out)
 ghconcat -g odoo -C -i -a addons/sale -o /tmp/head.txt
 
+# human-friendly diff
 diff -u /tmp/base.txt /tmp/head.txt | less -R
-```
+````
 
 </details>
 
 <details>
-<summary><strong>8.2 Automatic Architectural Summary (EN)</strong></summary>
+<summary><strong>8.2 Absolute-path audit (server-side CI)</strong></summary>
+
+Some CI pipelines require **absolute paths** for hyperlinks in HTML reports:
+
+````bash
+ghconcat -g py -g xml -C -i \
+         -a src -a migrations \
+         -p \                    # absolute headers
+         -u py \                 # wrap bodies in ```py fences
+         -o build/audit.txt
+````
+
+The resulting file can be post-processed into HTML with a trivial Markdown converter.
+
+</details>
+
+<details>
+<summary><strong>8.3 Automatic Architectural Summary (ChatGPT, EN)</strong></summary>
 
 ```bash
 ghconcat -g py -g dart -C -i -s -a src \
-         -t ai/summarise.tpl \
+         -t ai/summarise.tpl \              # template with {dump_data}
          -K version=$(git rev-parse --short HEAD) \
          -Q -o ai/summary.md -L EN
 ```
 
+* `-Q` pipes the rendered template to ChatGPT and stores the reply in `ai/summary.md`.
+* `-K` injects the current commit hash so the LLM can reference it in the answer.
+
 </details>
 
----
+<details>
+<summary><strong>8.4 CI Bundle with Three Independent Jobs</strong></summary>
+
+Aggregate backend, frontend and asset scans into one deterministic artifact:
+
+```bash
+ghconcat -X conf/ci_backend.bat  \
+         -X conf/ci_frontend.bat \
+         -X conf/ci_assets.bat   \
+         -o build/ci_bundle.txt
+```
+
+Each `.bat` file is parsed line-by-line with full CLI semantics; flags follow the inheritance
+rules described in §7.2.
+
+</details>
+
+<details>
+<summary><strong>8.5 Pre-commit Hook: Lint + Concatenate Only Changed Files</strong></summary>
+
+```bash
+# .git/hooks/pre-commit (chmod +x)
+changed=$(git diff --cached --name-only --relative | tr '\n' ' ')
+[ -z "$changed" ] && exit 0
+
+# run ruff / mypy first…
+ruff $changed && mypy --strict $changed || exit 1
+
+# concatenate the staged files for last-second review
+ghconcat -g py -C -i -a $changed -o /tmp/pre_commit_dump.txt
+less /tmp/pre_commit_dump.txt   # optional manual glance
+```
+
+The hook aborts the commit if linting fails; otherwise it offers a unified dump of
+exactly the staged lines, helping you spot sneaky debug prints before pushing.
+
+</details>
+
+<details>
+<summary><strong>8.6 One-liner: Generate a Markdown “source-of-truth” for Docs</strong></summary>
+
+````bash
+ghconcat -g dart -g js -C -i \
+         -a lib -a web \
+         -u js           \   # fenced ```js``` blocks
+         -o docs/src_of_truth.md
+````
+
+Developers can now link to line-stable sections in your knowledge base instead of raw files.
+
+</details>
+
+
 
 ## 9 · ChatGPT Gateway
 
