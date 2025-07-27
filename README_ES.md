@@ -65,14 +65,14 @@ ghconcat \
 ## 2 · Matriz de Funcionalidades
 
 | Dominio                   | Destacados                                                                                                  |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| ------------------------- |-------------------------------------------------------------------------------------------------------------|
 | **Descubrimiento**        | Recorrido recursivo, exclusión de rutas y directorios, filtro por sufijo, **omisión de archivos ocultos**   |
 | **Conjunto de lenguajes** | Mezcla de inclusiones (`‑g py`,`‑g xml`) y exclusiones (`‑G js`). Presets: `odoo`, `flutter`                |
 | **Limpieza**              | Elimina comentarios (`‑c` ➜ simples, `‑C` ➜ todos), imports (`‑i`), exports (`‑I`), líneas en blanco (`‑s`) |
 | **Recorte**               | Mantener *n* líneas (`‑n`), rangos arbitrarios (`‑n` + `‑N`), preservación de cabecera (`‑H`)               |
 | **Lotes**                 | Paquetes (`‑x`) y trabajos jerárquicos (`‑X`) con reglas de herencia                                        |
 | **Plantillas**            | Placeholder `{dump_data}`, alias personalizados (`‑k ALIAS`) y variables de entorno (`‑K VAR=VAL`)          |
-| **Puente LLM**            | Timeout robusto de 1800 s, wrapping seguro JSON, bloques de código automáticos (`‑u`)                       |
+| **Puente LLM**            | Timeout robusto de 1800 s, wrapping seguro JSON, bloques de código automáticos (`‑u`)                       |
 | **Salida**                | Archivo `‑o` opcional; sin él el volcado solo se devuelve (modo librería)                                   |
 | **Rutas de cabecera**     | **Relativas por defecto**; añade `‑p/‑‑absolute‑path` para rutas absolutas                                  |
 | **Auto‑actualización**    | `--upgrade` obtiene el último commit de GitHub en una copia atómica                                         |
@@ -81,7 +81,7 @@ ghconcat \
 
 ## 3 · Instalación
 
-> ghconcat es Python puro ≥ 3.8 y **no tiene dependencias de ejecución externas**
+> ghconcat es Python puro ≥ 3.8 y **no tiene dependencias de ejecución externas**
 > (las funciones ChatGPT son opcionales; véase más abajo).
 
 ### Unix‑like (Linux / macOS)
@@ -160,7 +160,7 @@ export OPENAI_API_KEY=sk-********************************
 *(los flags se agrupan por temática; los repetibles se marcan explícitamente)*
 
 | Flags                          | Propósito / Notas                                                                 |
-| ------------------------------ | --------------------------------------------------------------------------------- |
+| ------------------------------ |-----------------------------------------------------------------------------------|
 | **Orquestación de lotes**      |                                                                                   |
 | `‑x FILE`                      | *Paquete inline* – expande flags desde FILE **antes** del parseo                  |
 | `‑X FILE` *(repetible)*        | *Trabajo por lote* – ejecuta FILE como trabajo independiente y fusiona su volcado |
@@ -172,12 +172,12 @@ export OPENAI_API_KEY=sk-********************************
 | `‑E PAT` *(repetible)*         | Excluye cualquier ruta que contenga PAT                                           |
 | `‑S SUF` *(repetible)*         | Solo incluye archivos que terminen con SUF                                        |
 | **Conjunto de lenguajes**      |                                                                                   |
-| `‑g LANG` *(repetible)*        | Incluye lenguaje/extensión (`py`, `xml`, `.csv`, preset `odoo`)                   |
+| `‑g LANG` *(repetible)*        | Incluye lenguaje/extensión (`py`, `xml`, `.csv`, preset `odoo`)                   |
 | `‑G LANG` *(repetible)*        | Excluye lenguaje/extensión                                                        |
 | **Recorte**                    |                                                                                   |
 | `‑n NUM`                       | Mantiene NUM líneas desde `first_line` (`‑N`) o desde arriba                      |
-| `‑N LINE`                      | Línea base 1 donde inicia el recorte                                              |
-| `‑H`                           | Duplica la línea 1 original si quedó fuera del recorte                            |
+| `‑N LINE`                      | Línea base 1 donde inicia el recorte                                              |
+| `‑H`                           | Duplica la línea 1 original si quedó fuera del recorte                            |
 | **Limpieza**                   |                                                                                   |
 | `‑c` / `‑C`                    | Quita comentarios simples / todos                                                 |
 | `‑i` / `‑I`                    | Elimina `import` / `export`                                                       |
@@ -369,12 +369,12 @@ Los desarrolladores pueden enlazar a secciones estables por línea en tu base de
 ## 9 · Pasarela ChatGPT
 
 | Aspecto          | Detalle                                                                             |
-| ---------------- | ----------------------------------------------------------------------------------- |
+| ---------------- |-------------------------------------------------------------------------------------|
 | Prompt sistema   | Opinativo, bilingüe; sobrescribe con `‑M my_prompt.txt`                             |
 | Placeholders     | Sustituye siempre `{dump_data}` más cualquier `‑K VAR=VAL` o `‑k alias`             |
-| Seguridad tokens | Máx ≈ 128 k tokens (≈ 350 k chars) – aborta temprano con mensaje claro si se excede |
-| Timeout          | 1800 s de pared                                                                     |
-| Modos fallo      | Errores de red / cuota / formato ⇒ **exit ≠ 0**, volcado local intacto              |
+| Seguridad tokens | Máx ≈ 128 k tokens (≈ 350 k chars) – aborta temprano con mensaje claro si se excede |
+| Timeout          | 1800 s de pared                                                                     |
+| Modos fallo      | Errores de red / cuota / formato ⇒ **exit ≠ 0**, volcado local intacto              |
 
 ---
 
@@ -410,10 +410,10 @@ Añade al crontab:
 ## 12 · Solución de Problemas
 
 | Síntoma                                                       | Solución                                                     |
-| ------------------------------------------------------------- | ------------------------------------------------------------ |
+| ------------------------------------------------------------- |--------------------------------------------------------------|
 | *“After applying --exclude‑lang no active extension remains”* | Revisa tus `‑g/‑G`; filtraste **todo**                       |
 | Volcado vacío / archivos faltantes                            | Comprueba raíces (`‑a`), sufijos (`‑S`), directorios ocultos |
-| ChatGPT se cuelga                                             | Internet, API key, volcado <128 k tokens?                    |
+| ChatGPT se cuelga                                             | Internet, API key, volcado <128 k tokens?                    |
 | “Forbidden flag inside ‑X context”                            | Quita `‑o`, `‑t`, flags AI de esa línea de lote              |
 
 ---
