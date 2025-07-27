@@ -10,7 +10,7 @@ Production release – 2025‑07‑27
   - If **‑a/‑‑add‑path** is omitted, “.” (current dir) is assumed.
 
 * **Output policy**
-  - **Level 0**: **‑o/‑‑output is mandatory**; there is no fallback to *dump.txt*.
+  - **Level 0**: **‑o/‑‑output is mandatory**; there is no fallback to *dump.txt*.
   - **Nested ‑X** contexts never write a file **unless ‑o is given explicitly**.
 
 * **Context constraints**
@@ -25,6 +25,10 @@ Production release – 2025‑07‑27
 * **AI integration**
   - **‑Q/‑‑ai** demands **‑o** (an output path where the reply will be stored).
 
+* **Header path policy (NEW)**
+  - **Relative** to execution root by default.
+  - Use **‑p/‑‑absolute‑path** to force absolute paths.
+
 * **Filters & pruning order**
   1. Include roots (‑a)
   2. Walk trees, then apply ‑g/‑G/‑S/‑e/**E**
@@ -34,7 +38,7 @@ Production release – 2025‑07‑27
   6. Clean with ‑c/‑C/‑s/‑i/‑I
   7. Empty bodies are skipped (path is printed only with ‑l)
 
-This file is self‑contained, production‑ready and 100 % compliant with the user’s
+This file is self‑contained, production‑ready and 100% compliant with the user’s
 development standards (PEP8, type hints, exhaustive docstrings).
 """
 
@@ -104,11 +108,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     openai = None  # type: ignore
 
-
     class OpenAIError(Exception):  # type: ignore
         """Raised when the OpenAI SDK is unavailable."""
         ...
-
 
 # ───────────────────────── Utility helpers ─────────────────────────
 def _fatal(msg: str, code: int = 1) -> None:
@@ -168,7 +170,7 @@ def _expand_x(argv: Sequence[str]) -> List[str]:
     the **sole** argument besides the filename itself.
     """
     if argv.count("-x") + argv.count("--directives") > 1:
-        _fatal("Only one -x/--directives allowed at level 0.")
+        _fatal("Only one -x/--directives allowed at level 0.")
     if "-x" in argv or "--directives" in argv:
         if len(argv) > 2:
             _fatal("When using -x/--directives it must be the only CLI flag.")
@@ -225,12 +227,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── Batching
     grp_batch.add_argument(
         "-x", "--directives", dest="x", metavar="FILE",
-        help="Load every CLI flag from FILE (level 0 only)."
+        help="Load every CLI flag from FILE (level 0 only)."
     )
     grp_batch.add_argument(
         "-X", "--context", action="append", dest="batch_directives",
         metavar="FILE",
-        help="Run nested batch file (level > 0, repeatable)."
+        help="Run nested batch file (level > 0, repeatable)."
     )
 
     # ── Location
@@ -269,7 +271,7 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Absolute 1‑based line where slicing starts.")
     grp_rng.add_argument("-H", "--keep-header", action="store_true",
                          dest="keep_header",
-                         help="Duplicate original line 1 when excluded by slicing.")
+                         help="Duplicate original line 1 when excluded by slicing.")
 
     # ── Cleaning
     grp_cln.add_argument("-c", "--remove-comments", dest="rm_simple",
@@ -287,16 +289,19 @@ def _build_parser() -> argparse.ArgumentParser:
     grp_out.add_argument("-t", "--template", dest="template", metavar="FILE",
                          help="Render dump into FILE template before writing output.")
     grp_out.add_argument("-o", "--output", dest="output", metavar="FILE",
-                         help="Destination file (mandatory at level 0).")
+                         help="Destination file (mandatory at level 0).")
     grp_out.add_argument("-u", "--wrap", dest="wrap_lang", metavar="LANG",
                          help="Fence every chunk inside ```LANG``` blocks.")
     grp_out.add_argument("-l", "--list", dest="list_only", action="store_true",
                          help="List matched file routes only (no body).")
+    grp_out.add_argument("-p", "--absolute-path", dest="absolute_path",
+                         action="store_true",
+                         help="Show absolute paths in headers (default: relative).")
 
     grp_out.add_argument("-k", "--alias", dest="alias",
                          metavar="ALIAS",
                          help="Expose this dump as {ALIAS} to the parent template "
-                              "(max 1 per level).")
+                              "(max 1 per level).")
     grp_out.add_argument("-K", "--env", dest="env_vars", action="append",
                          metavar="VAR=VAL",
                          help="Define VAR for template interpolation (requires -t).")
@@ -384,7 +389,7 @@ def _ensure_mandatory(ns: argparse.Namespace, *, level: int) -> None:
 
     • “‑g” is optional ⇒ wildcard when omitted.
     • “‑a” is optional ⇒ “.” when omitted.
-    • No level enforces «‑o» any more; if absent the dump is returned only.
+    • No level enforces «‑o» any more; if absent the dump is returned only.
     """
     if ns.upgrade:
         return
@@ -404,7 +409,7 @@ def _validate_context_flags(ns: argparse.Namespace, *, level: int) -> None:
 
     Key rules
     ---------
-    • “‑x/‑‑directives” allowed **only** at level 0.
+    • “‑x/‑‑directives” allowed **only** at level 0.
     • Inside an ‑X at least one of {roots, alias, env_vars, ai} must exist.
     • “‑K” entries must follow VAR=VAL syntax.
     """
@@ -454,8 +459,8 @@ def _discard_comment(line: str, ext: str, simple: bool, full: bool) -> bool:
         return False
     trimmed = line.rstrip()
     return (
-            (full and rules[1].match(trimmed)) or
-            (simple and rules[0].match(trimmed))
+        (full and rules[1].match(trimmed)) or
+        (simple and rules[0].match(trimmed))
     )
 
 
@@ -579,10 +584,11 @@ def _slice_raw(
     return selected
 
 
-def _concat(                  # noqa: C901  — cognitive-complexity aceptada
+def _concat(                  # noqa: C901
         files: List[Path],
         ns: argparse.Namespace,
         wrapped: Optional[List[Tuple[str, str]]] = None,
+        header_root: Optional[Path] = None,
 ) -> str:
     """
     Build the concatenated *dump* applying clean-ups, slicing and wrapping.
@@ -597,6 +603,7 @@ def _concat(                  # noqa: C901  — cognitive-complexity aceptada
        and stored in *wrapped* for later use inside templates.
     """
     pieces: List[str] = []
+    base_root = header_root or Path.cwd()
 
     for fp in files:
         ext = fp.suffix.lower()
@@ -623,10 +630,19 @@ def _concat(                  # noqa: C901  — cognitive-complexity aceptada
         if empty_body and not ns.list_only:
             continue
 
+        # ── Header path (relative or absolute) ──────────────────────────
+        if ns.absolute_path:
+            header_path = str(fp)
+        else:
+            try:
+                header_path = str(fp.relative_to(base_root))
+            except ValueError:
+                header_path = os.path.relpath(fp, base_root)
+
         # ── Header (ensure leading newline) ─────────────────────────────
         if pieces and not pieces[-1].endswith("\n"):
             pieces[-1] += "\n"
-        header = f"{HEADER_DELIM}{fp} {HEADER_DELIM}\n"
+        header = f"{HEADER_DELIM}{header_path} {HEADER_DELIM}\n"
         pieces.append(header)
 
         # ── Only list routes? ───────────────────────────────────────────
@@ -643,7 +659,7 @@ def _concat(                  # noqa: C901  — cognitive-complexity aceptada
         if wrapped is not None:
             lang = ns.wrap_lang or ext.lstrip(".")
             wrapped.append(
-                (str(fp), f"```{lang}\n{body.rstrip()}\n```")
+                (header_path, f"```{lang}\n{body.rstrip()}\n```")
             )
 
     return "".join(pieces)
@@ -786,7 +802,7 @@ def _execute_single(
         return ""
 
     wrapped_chunks: Optional[List[Tuple[str, str]]] = [] if ns.wrap_lang else None
-    raw_dump = _concat(files, ns, wrapped_chunks)
+    raw_dump = _concat(files, ns, wrapped_chunks, header_root=root)
     if ns.wrap_lang and wrapped_chunks:
         wrap_lang = ns.wrap_lang
         fenced = [
@@ -977,7 +993,7 @@ class GhConcat:
         return dump
 
 
-# ───────────────────────────── CLI entrypoint ─────────────────────────────
+# ───────────────────────────── CLI entry‑point ─────────────────────────────
 def main() -> None:  # pragma: no cover
     """Classic CLI entry‑point."""
     try:
