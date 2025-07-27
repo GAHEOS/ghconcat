@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# fixtures.sh – Builds the complete fixture tree for ghconcat test‑suite
-#
-# Compatible with ghconcat spec v2 (2025‑07‑26).
+# fixtures.sh – Build the complete fixture tree for ghconcat test-suite
+# Flags updated to final nomenclature (spec v2, 2025-07-26)
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -15,7 +14,7 @@ echo "⚙️  Building fixture tree in: $ROOT"
 rm -rf "$ROOT"
 mkdir -p \
   "$ROOT/src/module" \
-  "$ROOT/src/other" \
+  "$ROOT/src/other"  \
   "$ROOT/extra/nested" \
   "$ROOT/build" \
   "$ROOT/.hidden" \
@@ -102,7 +101,7 @@ GCX
 cat > "$ROOT/batch.gcx" <<'GCX'
 -a extra
 -g go
--A BATCH_DUMP
+-k BATCH_DUMP
 GCX
 
 echo "suffix test" > "$ROOT/src/module/file.testext"
@@ -121,7 +120,8 @@ setting: true
 YAML
 
 mkdir -p "$ROOT/src/module/ünicode dir"
-echo "console.log('space');" > "$ROOT/src/module/ünicode dir/file with space.js"
+echo "console.log('space');" \
+  > "$ROOT/src/module/ünicode dir/file with space.js"
 
 printf 'line1\r\nline2\r\n' > "$ROOT/extra/crlf.txt"
 
@@ -137,13 +137,13 @@ cat > "$ROOT/batch_ws.gcx" <<'GCX'
 -w /tmp
 -a extra
 -g .txt
--A WS_BATCH
+-k WS_BATCH
 GCX
 
 cat > "$ROOT/inline_wrap.gcx" <<'GCX'
 -a "src/module/ünicode dir/file with space.js"
 -g js
--W js
+-u js
 GCX
 
 mkdir -p "$ROOT/src/.private/inner"
@@ -154,7 +154,7 @@ mkdir -p "$ROOT/ws1/src/other" "$ROOT/ws2/src/module"
 cp -a "$ROOT/src/other/."          "$ROOT/ws1/src/other/"
 cp    "$ROOT/src/module/echo.dart" "$ROOT/ws2/src/module/"
 
-# Inline -x files (now will be used as -X)
+# Inline -x files (now used with -X)
 cat > "$ROOT/inline1.gcx" <<'GCX'
 -a src/module/charlie.js
 -g js
@@ -171,7 +171,7 @@ cat > "$ROOT/inline3.gcx" <<'GCX'
 -g go
 GCX
 
-# Batch -X files
+# Batch files
 cat > "$ROOT/batch1.gcx" <<'GCX'
 -w ws1
 -a src/other
