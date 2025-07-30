@@ -118,9 +118,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     openai = None  # type: ignore
 
+
     class OpenAIError(Exception):  # type: ignore
         """Raised when the OpenAI SDK is unavailable."""
         ...
+
 
 # ───────────────────────── Utility helpers ─────────────────────────
 def _fatal(msg: str, code: int = 1) -> None:
@@ -211,6 +213,7 @@ def _split_list(raw: Optional[List[str]]) -> List[str]:
     return flat
 
 
+# ───────────────────────────── CLI parser ─────────────────────────────
 def _build_parser() -> argparse.ArgumentParser:
     """Return the fully configured argparse parser used at every level."""
     p = argparse.ArgumentParser(
@@ -218,8 +221,8 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawTextHelpFormatter,
         usage="%(prog)s [-x FILE] [-X FILE] -g LANG -a PATH [...] [OPTIONS]",
         description=(
-            "Concatenate, slice and post‑process source files with optional "
-            "AI integration and multi‑level batching."
+            "Concatenate, slice and post-process source files with optional "
+            "AI integration and multi-level batching."
         ),
         add_help=False,
     )
@@ -228,7 +231,7 @@ def _build_parser() -> argparse.ArgumentParser:
     grp_batch = p.add_argument_group("Batching / nesting")
     grp_loc = p.add_argument_group("Location & discovery")
     grp_lang = p.add_argument_group("Language filters")
-    grp_rng = p.add_argument_group("Line‑range slicing")
+    grp_rng = p.add_argument_group("Line-range slicing")
     grp_cln = p.add_argument_group("Cleaning options")
     grp_out = p.add_argument_group("Output, templating & variables")
     grp_ai = p.add_argument_group("AI integration")
@@ -272,20 +275,20 @@ def _build_parser() -> argparse.ArgumentParser:
                           dest="skip_langs", metavar="LANG",
                           help="Language/extension to exclude from the active set.")
 
-    # ── Line‑range
+    # ── Line-range
     grp_rng.add_argument("-n", "--total-lines", dest="total_lines",
                          type=int, metavar="NUM",
                          help="Keep NUM lines (after --start-line).")
     grp_rng.add_argument("-N", "--start-line", dest="first_line",
                          type=int, metavar="LINE",
-                         help="Absolute 1‑based line where slicing starts.")
+                         help="Absolute 1-based line where slicing starts.")
     grp_rng.add_argument("-H", "--keep-header", action="store_true",
                          dest="keep_header",
                          help="Duplicate original line 1 when excluded by slicing.")
 
     # ── Cleaning
     grp_cln.add_argument("-c", "--remove-comments", dest="rm_simple",
-                         action="store_true", help="Remove single‑line comments.")
+                         action="store_true", help="Remove single-line comments.")
     grp_cln.add_argument("-C", "--remove-all-comments", dest="rm_all",
                          action="store_true", help="Remove **all** comments.")
     grp_cln.add_argument("-i", "--remove-import", action="store_true",
@@ -307,6 +310,9 @@ def _build_parser() -> argparse.ArgumentParser:
     grp_out.add_argument("-p", "--absolute-path", dest="absolute_path",
                          action="store_true",
                          help="Show absolute paths in headers (default: relative).")
+    grp_out.add_argument("-P", "--no-headers", dest="skip_headers",
+                         action="store_true",
+                         help="Omit route header lines (===== path =====).")
 
     grp_out.add_argument("-k", "--alias", dest="alias",
                          metavar="ALIAS",
@@ -322,12 +328,24 @@ def _build_parser() -> argparse.ArgumentParser:
     grp_ai.add_argument("-m", "--ai-model", dest="ai_model",
                         default=DEFAULT_OPENAI_MODEL, metavar="MODEL",
                         help=f"OpenAI model (default: {DEFAULT_OPENAI_MODEL}).")
+    grp_ai.add_argument("-T", "--temperature", dest="temperature",
+                        type=float, default=1.2, metavar="NUM",
+                        help="OpenAI sampling temperature (default 1.2).")
+    grp_ai.add_argument("-B", "--top-p", dest="top_p",
+                        type=float, metavar="NUM",
+                        help="OpenAI nucleus-sampling probability top_p.")
+    grp_ai.add_argument("-R", "--presence-penalty", dest="presence_penalty",
+                        type=float, metavar="NUM",
+                        help="OpenAI presence penalty.")
+    grp_ai.add_argument("-F", "--frequency-penalty", dest="frequency_penalty",
+                        type=float, metavar="NUM",
+                        help="OpenAI frequency penalty.")
     grp_ai.add_argument("-M", "--ai-system-prompt", dest="ai_system_prompt",
-                        metavar="FILE", help="Override the built‑in system prompt.")
+                        metavar="FILE", help="Override the built-in system prompt.")
 
     # ── Misc
     grp_misc.add_argument("-U", "--upgrade", dest="upgrade", action="store_true",
-                          help="Self‑update ghconcat from GitHub.")
+                          help="Self-update ghconcat from GitHub.")
     grp_misc.add_argument("-L", "--i18n", dest="i18n", default=DEFAULT_I18N,
                           choices=["ES", "EN"],
                           help="Runtime message language (ES default).")
@@ -469,8 +487,8 @@ def _discard_comment(line: str, ext: str, simple: bool, full: bool) -> bool:
         return False
     trimmed = line.rstrip()
     return (
-        (full and rules[1].match(trimmed)) or
-        (simple and rules[0].match(trimmed))
+            (full and rules[1].match(trimmed)) or
+            (simple and rules[0].match(trimmed))
     )
 
 
@@ -594,18 +612,19 @@ def _slice_raw(
     return selected
 
 
+# ───────────── Concatenation & slicing helper ─────────────
 def _concat(  # noqa: C901
-        files: List[Path],
-        ns: argparse.Namespace,
-        wrapped: Optional[List[Tuple[str, str]]] = None,
-        header_root: Optional[Path] = None,
+    files: List[Path],
+    ns: argparse.Namespace,
+    wrapped: Optional[List[Tuple[str, str]]] = None,
+    header_root: Optional[Path] = None,
 ) -> str:
     """
-    Build the concatenated *dump* applying clean‑ups, slicing and wrapping.
+    Build the concatenated *dump* applying clean-ups, slicing and wrapping.
 
     Behaviour
     ---------
-    1. With “‑l/‑‑list” only headers are emitted.
+    1. With “-l/--list” only headers are emitted.
     2. Empty bodies are skipped entirely (except with -l).
     3. Each header line is always *preceded* by a newline when the previous
        chunk did not finish with one, preventing “}=====” artefacts.
@@ -627,7 +646,7 @@ def _concat(  # noqa: C901
             raw_lines, ns.first_line, ns.total_lines, ns.keep_header
         )
 
-        # ── Clean‑ups ───────────────────────────────────────────────────
+        # ── Clean-ups ───────────────────────────────────────────────────
         cleaned = _clean_lines(
             slice_raw,
             ext,
@@ -652,10 +671,11 @@ def _concat(  # noqa: C901
                 header_path = os.path.relpath(fp, base_root)
 
         # ── Header (ensure leading newline) ─────────────────────────────
-        if pieces and not pieces[-1].endswith("\n"):
-            pieces[-1] += "\n"
-        header = f"{HEADER_DELIM}{header_path} {HEADER_DELIM}\n"
-        pieces.append(header)
+        if not ns.skip_headers:
+            if pieces and not pieces[-1].endswith("\n"):
+                pieces[-1] += "\n"
+            header = f"{HEADER_DELIM}{header_path} {HEADER_DELIM}\n"
+            pieces.append(header)
 
         # ── Only list routes? ───────────────────────────────────────────
         if ns.list_only:
@@ -705,30 +725,65 @@ def _default_sys_prompt(lang: str) -> str:
     return prompt
 
 
+# ─────────────── AI helper – OpenAI wrapper ───────────────
 def _call_openai(
         prompt: str,
         out_path: Path,
         model: str,
         system_prompt: str,
+        *,
+        temperature: float = 1.2,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
+        timeout: int = 1800,
 ) -> None:
-    """Send *prompt* to OpenAI and write the assistant reply to *out_path*."""
+    """
+    Send *prompt* to OpenAI and write the assistant reply to *out_path*.
+
+    Parameters
+    ----------
+    prompt:
+        The user prompt that will be sent to the assistant.
+    out_path:
+        Local file where the reply will be written.
+    model:
+        OpenAI model name (e.g. ``o3``).
+    system_prompt:
+        System prompt injected before the user message.
+    temperature, top_p, presence_penalty, frequency_penalty:
+        Sampling controls exposed via CLI (all optional except *temperature*).
+    timeout:
+        Network timeout in seconds (default 1800).
+    """
     if openai is None:
         _fatal("openai not installed. Run: pip install openai")
     if not (key := os.getenv("OPENAI_API_KEY")):
         _fatal("OPENAI_API_KEY not defined.")
-    client = openai.OpenAI(api_key=key)  # type: ignore
+
+    client = openai.OpenAI(api_key=key)  # type: ignore[attr-defined]
+
+    params: dict[str, object] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": temperature,
+        "timeout": timeout,
+    }
+    if top_p is not None:
+        params["top_p"] = top_p
+    if presence_penalty is not None:
+        params["presence_penalty"] = presence_penalty
+    if frequency_penalty is not None:
+        params["frequency_penalty"] = frequency_penalty
+
     try:
-        rsp = client.chat.completions.create(  # type: ignore
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            timeout=1800,
-        )
+        rsp = client.chat.completions.create(**params)  # type: ignore[arg-type]
         out_path.write_text(rsp.choices[0].message.content, encoding="utf-8")
         print(f"✔ AI reply saved → {out_path}")
-    except OpenAIError as exc:  # type: ignore
+    except OpenAIError as exc:  # type: ignore[misc]
         _fatal(f"OpenAI error: {exc}")
 
 
@@ -779,10 +834,11 @@ def _parse_env_list(env_items: List[str] | None) -> Dict[str, str]:
     return mapping
 
 
+# ─────────────── Single-context executor ───────────────
 def _execute_single(
-        ns: argparse.Namespace,
-        workspace: Path,
-        root: Path,
+    ns: argparse.Namespace,
+    workspace: Path,
+    root: Path,
 ) -> str:
     """
     Perform one concatenation job and return the raw dump string produced.
@@ -816,23 +872,27 @@ def _execute_single(
     # ── Wrap final output if requested ──────────────────────────────────
     if ns.wrap_lang and wrapped_chunks:
         wrap_lang = ns.wrap_lang
-        fenced = [
-            f"{HEADER_DELIM}{p} {HEADER_DELIM}\n"
-            f"```{wrap_lang or Path(p).suffix.lstrip('.')}\n{c.rstrip()}\n```\n"
-            for p, c in wrapped_chunks
-            if c
-        ]
+        fenced = []
+        for p, c in wrapped_chunks:
+            if not c:
+                continue
+            header_str = "" if ns.skip_headers else f"{HEADER_DELIM}{p} {HEADER_DELIM}\n"
+            fenced.append(
+                f"{header_str}"
+                f"```{wrap_lang or Path(p).suffix.lstrip('.')}\n{c.rstrip()}\n```\n"
+            )
         return "".join(fenced)
     return raw_dump
 
 
+# ─────────────── Core recursive executor ───────────────
 def _execute(
-        ns: argparse.Namespace,
-        *,
-        level: int = 0,
-        parent_root: Optional[Path] = None,
-        parent_workspace: Optional[Path] = None,
-        inherited_vars: Optional[Dict[str, str]] = None,
+    ns: argparse.Namespace,
+    *,
+    level: int = 0,
+    parent_root: Optional[Path] = None,
+    parent_workspace: Optional[Path] = None,
+    inherited_vars: Optional[Dict[str, str]] = None,
 ) -> tuple[Dict[str, str], str]:
     """
     Recursively execute *ns* and its children.
@@ -870,7 +930,7 @@ def _execute(
     # ─── Vars from -K ───
     local_vars.update(_parse_env_list(ns.env_vars))
 
-    # ─── Children (‑X) ───
+    # ─── Children (-X) ───
     for bfile in ns.batch_directives or []:
         dpath = Path(bfile)
         if not dpath.is_absolute():
@@ -921,7 +981,17 @@ def _execute(
             if ns.ai_system_prompt
             else _default_sys_prompt(ns.i18n)
         )
-        _call_openai(rendered, out_path, ns.ai_model, sys_prompt)
+        _call_openai(
+            rendered,
+            out_path,
+            ns.ai_model,
+            sys_prompt,
+            temperature=ns.temperature,
+            top_p=ns.top_p,
+            presence_penalty=ns.presence_penalty,
+            frequency_penalty=ns.frequency_penalty,
+            timeout=1800,
+        )
     elif out_path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(rendered, encoding="utf-8")
