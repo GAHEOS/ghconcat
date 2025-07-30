@@ -752,33 +752,24 @@ def _call_openai(
 
     # ── Compatibilidad de temperatura ─────────────────────────────────
     fixed_temp_models: set[str] = {"o3"}  # añadir otros si aplica
-    use_temp = temperature if temperature is not None else 1.0
-    if any(model.lower().startswith(m) for m in fixed_temp_models) and use_temp != 1:
-        print(
-            f"ⓘ Info: model '{model}' ignora temperature={use_temp}; "
-            "usando temperature=1.",
-            file=sys.stderr,
-        )
-        use_temp = 1.0
-
     client = openai.OpenAI(api_key=key)  # type: ignore[attr-defined]
-
     params: dict[str, object] = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
-        "temperature": use_temp,
         "timeout": timeout,
     }
-    if top_p is not None:
-        params["top_p"] = top_p
-    if presence_penalty is not None:
-        params["presence_penalty"] = presence_penalty
-    if frequency_penalty is not None:
-        params["frequency_penalty"] = frequency_penalty
-
+    if not any(model.lower().startswith(m) for m in fixed_temp_models):
+        if temperature is not None:
+            params["temperature"] = temperature
+        if top_p is not None:
+            params["top_p"] = top_p
+        if presence_penalty is not None:
+            params["presence_penalty"] = presence_penalty
+        if frequency_penalty is not None:
+            params["frequency_penalty"] = frequency_penalty
     try:
         rsp = client.chat.completions.create(**params)  # type: ignore[arg-type]
         out_path.write_text(rsp.choices[0].message.content, encoding="utf-8")
