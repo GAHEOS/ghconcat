@@ -3,7 +3,7 @@
 ghconcat – universal source‑code concatenator
 ============================================
 
-Production release – 2025‑07‑27 ( patch 1 )
+Production release – 2025‑07‑27 (patch 1)
 -------------------------------------------
 * **Fixes**
   - **Single wrap fencing**: solved the bug that generated nested
@@ -15,7 +15,7 @@ Production release – 2025‑07‑27 ( patch 1 )
   - If **‑a/‑‑add‑path** is omitted, “.” (current dir) is assumed.
 
 * **Output policy**
-  - **Level 0**: **‑o/‑‑output is mandatory**; there is no fallback to
+  - **Level 0**: **‑o/‑‑output is mandatory**; there is no fallback to
     *dump.txt*.
   - **Nested ‑X** contexts never write a file **unless ‑o is given
     explicitly**.
@@ -47,7 +47,7 @@ Production release – 2025‑07‑27 ( patch 1 )
   6. Clean with ‑c/‑C/‑s/‑i/‑I
   7. Empty bodies are skipped (path is printed only with ‑l)
 
-This file is self‑contained, production‑ready and 100 % compliant with
+This file is self‑contained, production‑ready and 100 % compliant with
 PEP8, type hints and exhaustive English docstrings.
 """
 
@@ -724,7 +724,7 @@ def _call_openai(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
-            timeout=120,
+            timeout=1800,
         )
         out_path.write_text(rsp.choices[0].message.content, encoding="utf-8")
         print(f"✔ AI reply saved → {out_path}")
