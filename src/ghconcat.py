@@ -329,8 +329,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         default=DEFAULT_OPENAI_MODEL, metavar="MODEL",
                         help=f"OpenAI model (default: {DEFAULT_OPENAI_MODEL}).")
     grp_ai.add_argument("-T", "--temperature", dest="temperature",
-                        type=float, default=1.2, metavar="NUM",
-                        help="OpenAI sampling temperature (default 1.2).")
+                        type=float, default=1.0, metavar="NUM",
+                        help="OpenAI sampling temperature.")
     grp_ai.add_argument("-B", "--top-p", dest="top_p",
                         type=float, metavar="NUM",
                         help="OpenAI nucleus-sampling probability top_p.")
@@ -614,10 +614,10 @@ def _slice_raw(
 
 # ───────────── Concatenation & slicing helper ─────────────
 def _concat(  # noqa: C901
-    files: List[Path],
-    ns: argparse.Namespace,
-    wrapped: Optional[List[Tuple[str, str]]] = None,
-    header_root: Optional[Path] = None,
+        files: List[Path],
+        ns: argparse.Namespace,
+        wrapped: Optional[List[Tuple[str, str]]] = None,
+        header_root: Optional[Path] = None,
 ) -> str:
     """
     Build the concatenated *dump* applying clean-ups, slicing and wrapping.
@@ -726,13 +726,14 @@ def _default_sys_prompt(lang: str) -> str:
 
 
 # ─────────────── AI helper – OpenAI wrapper ───────────────
+# ─────────────── AI helper – OpenAI wrapper (patched) ───────────────
 def _call_openai(
         prompt: str,
         out_path: Path,
         model: str,
         system_prompt: str,
         *,
-        temperature: float = 1.2,
+        temperature: float | None = None,
         top_p: float | None = None,
         presence_penalty: float | None = None,
         frequency_penalty: float | None = None,
@@ -741,25 +742,24 @@ def _call_openai(
     """
     Send *prompt* to OpenAI and write the assistant reply to *out_path*.
 
-    Parameters
-    ----------
-    prompt:
-        The user prompt that will be sent to the assistant.
-    out_path:
-        Local file where the reply will be written.
-    model:
-        OpenAI model name (e.g. ``o3``).
-    system_prompt:
-        System prompt injected before the user message.
-    temperature, top_p, presence_penalty, frequency_penalty:
-        Sampling controls exposed via CLI (all optional except *temperature*).
-    timeout:
-        Network timeout in seconds (default 1800).
+    • Si el modelo solo admite temperatura fija (=1), cualquier valor distinto
+      se ignora y se emite un aviso en stderr (modo producción no aborta).
     """
     if openai is None:
         _fatal("openai not installed. Run: pip install openai")
     if not (key := os.getenv("OPENAI_API_KEY")):
         _fatal("OPENAI_API_KEY not defined.")
+
+    # ── Compatibilidad de temperatura ─────────────────────────────────
+    fixed_temp_models: set[str] = {"o3"}  # añadir otros si aplica
+    use_temp = temperature if temperature is not None else 1.0
+    if any(model.lower().startswith(m) for m in fixed_temp_models) and use_temp != 1:
+        print(
+            f"ⓘ Info: model '{model}' ignora temperature={use_temp}; "
+            "usando temperature=1.",
+            file=sys.stderr,
+        )
+        use_temp = 1.0
 
     client = openai.OpenAI(api_key=key)  # type: ignore[attr-defined]
 
@@ -769,7 +769,7 @@ def _call_openai(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
-        "temperature": temperature,
+        "temperature": use_temp,
         "timeout": timeout,
     }
     if top_p is not None:
@@ -836,9 +836,9 @@ def _parse_env_list(env_items: List[str] | None) -> Dict[str, str]:
 
 # ─────────────── Single-context executor ───────────────
 def _execute_single(
-    ns: argparse.Namespace,
-    workspace: Path,
-    root: Path,
+        ns: argparse.Namespace,
+        workspace: Path,
+        root: Path,
 ) -> str:
     """
     Perform one concatenation job and return the raw dump string produced.
@@ -887,12 +887,12 @@ def _execute_single(
 
 # ─────────────── Core recursive executor ───────────────
 def _execute(
-    ns: argparse.Namespace,
-    *,
-    level: int = 0,
-    parent_root: Optional[Path] = None,
-    parent_workspace: Optional[Path] = None,
-    inherited_vars: Optional[Dict[str, str]] = None,
+        ns: argparse.Namespace,
+        *,
+        level: int = 0,
+        parent_root: Optional[Path] = None,
+        parent_workspace: Optional[Path] = None,
+        inherited_vars: Optional[Dict[str, str]] = None,
 ) -> tuple[Dict[str, str], str]:
     """
     Recursively execute *ns* and its children.
