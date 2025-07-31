@@ -39,10 +39,10 @@ Production release – 2025‑07‑27 ( patch 1 )
   - Use **‑p/‑‑absolute‑path** to force absolute paths.
 
 * **Filters & pruning order**
-  1. Include roots (‑a)
+  1. Include add_path (‑a)
   2. Walk trees, then apply ‑g/‑G/‑S/‑e/‑E
   3. Dispatch each file by extension
-  4. Add single‑file roots (‑a FILE)
+  4. Add single‑file add_path (‑a FILE)
   5. Slice with ‑n/‑N/‑H
   6. Clean with ‑c/‑C/‑s/‑i/‑I
   7. Empty bodies are skipped (path is printed only with ‑l)
@@ -247,13 +247,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # ── Location
     grp_loc.add_argument("-a", "--add-path", action="append",
-                         dest="roots", metavar="PATH",
+                         dest="add_path", metavar="PATH",
                          help="File or directory to scan (repeatable).")
-    grp_loc.add_argument("-r", "--root", dest="root", metavar="DIR",
-                         help="Logical root used to resolve relative paths.")
-    grp_loc.add_argument("-w", "--workspace", dest="workspace", metavar="DIR",
+    grp_loc.add_argument("-w", "--workdir", dest="workdir", metavar="DIR",
+                         help="Logical workdir used to resolve relative paths.")
+    grp_loc.add_argument("-W", "--workspace", dest="workspace", metavar="DIR",
                          help="Working directory where outputs are written "
-                              "(default: same as --root).")
+                              "(default: same as --workdir).")
     grp_loc.add_argument("-e", "--exclude-dir", action="append",
                          dest="exclude_dir", metavar="DIR",
                          help="Skip DIR and all its descendants (repeatable).")
@@ -344,7 +344,7 @@ def _parse_cli(argv: Sequence[str]) -> argparse.Namespace:
 
     Additional rules
     ----------------
-    • «‑r/‑‑root», «‑w/‑‑workspace» and «‑k/‑‑alias» may appear at most once
+    • «‑r/‑‑workdir», «‑w/‑‑workspace» and «‑k/‑‑alias» may appear at most once
       per context.
     • «‑‑upgrade» must be *stand‑alone* (no other flags allowed).
     """
@@ -357,8 +357,8 @@ def _parse_cli(argv: Sequence[str]) -> argparse.Namespace:
             _fatal("--upgrade must be used alone (no additional flags allowed).")
 
     # Duplicate guards
-    if tokens.count("-r") + tokens.count("--root") > 1:
-        _fatal("Only one -r/--root allowed per level.")
+    if tokens.count("-r") + tokens.count("--workdir") > 1:
+        _fatal("Only one -r/--workdir allowed per level.")
     if tokens.count("-w") + tokens.count("--workspace") > 1:
         _fatal("Only one -w/--workspace allowed per level.")
     if tokens.count("-k") + tokens.count("--alias") > 1:
@@ -404,12 +404,12 @@ def _ensure_mandatory(ns: argparse.Namespace, *, level: int) -> None:
     if ns.upgrade:
         return
 
-    # Implicit «.» when user omitted roots
-    if not ns.roots:
-        ns.roots = ["."]
-    # Try to infer languages from single‑file roots
-    if not ns.languages and ns.roots:
-        inferred = _infer_langs_from_paths(ns.roots)
+    # Implicit «.» when user omitted add_path
+    if not ns.add_path:
+        ns.add_path = ["."]
+    # Try to infer languages from single‑file add_path
+    if not ns.languages and ns.add_path:
+        inferred = _infer_langs_from_paths(ns.add_path)
         ns.languages = inferred
 
 
@@ -420,7 +420,7 @@ def _validate_context_flags(ns: argparse.Namespace, *, level: int) -> None:
     Key rules
     ---------
     • “‑x/‑‑directives” allowed **only** at level 0.
-    • Inside an ‑X at least one of {roots, alias, env_vars, ai} must exist.
+    • Inside an ‑X at least one of {add_path, alias, env_vars, ai} must exist.
     • “‑K” entries must follow VAR=VAL syntax.
     """
     if level > 0 and getattr(ns, "x", None):
@@ -433,7 +433,7 @@ def _validate_context_flags(ns: argparse.Namespace, *, level: int) -> None:
         if "=" not in item:
             _fatal(f"--env expects VAR=VAL pairs (got '{item}')")
 
-    if level > 0 and not any([ns.roots, ns.alias, ns.env_vars, ns.ai]):
+    if level > 0 and not any([ns.add_path, ns.alias, ns.env_vars, ns.ai]):
         _fatal("Inside -X you must provide at least -a, -k, -K or -Q.")
 
 
@@ -446,15 +446,15 @@ def _resolve_path(base: Path, child: Optional[str]) -> Path:
     return p.resolve() if p.is_absolute() else (base / p).resolve()
 
 
-def _resolve_workspace(root: Path, workspace_raw: Optional[str]) -> Path:
+def _resolve_workspace(workdir: Path, workspace_raw: Optional[str]) -> Path:
     """
-    Resolve *workspace_raw*; default is *root* when None.
-    Relative paths are interpreted against *root*.
+    Resolve *workspace_raw*; default is *workdir* when None.
+    Relative paths are interpreted against *workdir*.
     """
     if workspace_raw is None:
-        return root
+        return workdir
     wp = Path(workspace_raw).expanduser()
-    return wp.resolve() if wp.is_absolute() else (root / wp).resolve()
+    return wp.resolve() if wp.is_absolute() else (workdir / wp).resolve()
 
 
 # ─────────────────────── Pattern helpers ───────────────────────
@@ -517,14 +517,14 @@ def _hidden(p: Path) -> bool:
 
 
 def _collect_files(
-        roots: List[Path],
+        add_path: List[Path],
         excludes: List[str],
         exclude_dirs: List[Path],
         suffixes: List[str],
         active_exts: Optional[Set[str]],
 ) -> List[Path]:
     """
-    Walk *roots* and collect every file that passes all filters.
+    Walk *add_path* and collect every file that passes all filters.
 
     *active_exts* = None → accept any extension (wildcard mode).
     """
@@ -550,7 +550,7 @@ def _collect_files(
             return
         collected.add(fp.resolve())
 
-    for root in roots:
+    for root in add_path:
         if not root.exists():
             print(f"ⓘ Warning: {root} does not exist; skipping.", file=sys.stderr)
             continue
@@ -787,9 +787,9 @@ def _execute_single(
     """
     Perform one concatenation job and return the raw dump string produced.
     """
-    roots = [
+    add_path = [
         Path(r).expanduser() if Path(r).is_absolute() else (root / r).resolve()
-        for r in (ns.roots or ["."]
+        for r in (ns.add_path or ["."]
                   )
     ]
     exclude_dirs = [
@@ -800,7 +800,7 @@ def _execute_single(
     active_exts = _build_active_exts(ns.languages, ns.skip_langs)
 
     files = _collect_files(
-        roots=roots,
+        add_path=add_path,
         excludes=ns.exclude or [],
         exclude_dirs=exclude_dirs,
         suffixes=ns.suffix or [],
@@ -860,7 +860,7 @@ def _execute(
     dumps: list[str] = []
 
     # ─── Main concatenation ───
-    if ns.roots or ns.languages:
+    if ns.add_path or ns.languages:
         dump_main = _execute_single(ns, workspace, root)
         if dump_main:
             dumps.append(dump_main)
