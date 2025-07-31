@@ -899,7 +899,7 @@ def _execute(
     _ensure_mandatory(ns, level=level)
 
     root_ref = parent_root if level > 0 else Path.cwd()
-    root = _resolve_path(root_ref, ns.root or ".")
+    root = _resolve_path(root_ref, ns.workdir or ".")
     workspace = _resolve_workspace(root, ns.workspace)
 
     if not root.exists():
@@ -1054,7 +1054,7 @@ class GhConcat:
 
         if ns.output:
             ws_root = _resolve_workspace(
-                _resolve_path(Path.cwd(), ns.root or "."),
+                _resolve_path(Path.cwd(), ns.workdir or "."),
                 ns.workspace,
             )
             out_path = _resolve_path(ws_root, ns.output)
