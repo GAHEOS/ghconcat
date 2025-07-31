@@ -249,23 +249,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # ── Location
-    grp_loc.add_argument("-a", "--add-path", action="append",
-                         dest="add_path", metavar="PATH",
-                         help="File or directory to scan (repeatable).")
     grp_loc.add_argument("-w", "--workdir", dest="workdir", metavar="DIR",
                          help="Logical workdir used to resolve relative paths.")
     grp_loc.add_argument("-W", "--workspace", dest="workspace", metavar="DIR",
                          help="Working directory where outputs are written "
                               "(default: same as --workdir).")
-    grp_loc.add_argument("-e", "--exclude-dir", action="append",
+    grp_loc.add_argument("-a", "--add-path", action="append",
+                         dest="add_path", metavar="PATH",
+                         help="File or directory to scan (repeatable).")
+    grp_loc.add_argument("-A", "--exclude-path", action="append",
                          dest="exclude_dir", metavar="DIR",
                          help="Skip DIR and all its descendants (repeatable).")
-    grp_loc.add_argument("-E", "--exclude-path", action="append",
-                         dest="exclude", metavar="PAT",
-                         help="Skip any path that contains PAT.")
-    grp_loc.add_argument("-S", "--suffix", action="append",
+    grp_loc.add_argument("-s", "--suffix", action="append",
                          dest="suffix", metavar="SUF",
                          help="Include only files whose name ends with SUF.")
+    grp_loc.add_argument("-S", "--exclude-suffix", action="append",
+                         dest="exclude", metavar="PAT",
+                         help="Skip any path that contains PAT.")
 
     # ── Languages
     grp_lang.add_argument("-g", "--include-lang", action="append",
@@ -295,7 +295,7 @@ def _build_parser() -> argparse.ArgumentParser:
                          dest="rm_import", help="Remove import statements.")
     grp_cln.add_argument("-I", "--remove-export", action="store_true",
                          dest="rm_export", help="Remove export statements.")
-    grp_cln.add_argument("-s", "--keep-blank", action="store_true",
+    grp_cln.add_argument("-B", "--keep-blank", action="store_true",
                          dest="keep_blank", help="Preserve blank lines.")
 
     # ── Output / templating / variables
@@ -303,6 +303,10 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Render dump into FILE template before writing output.")
     grp_out.add_argument("-o", "--output", dest="output", metavar="FILE",
                          help="Destination file (mandatory at level 0).")
+    grp_out.add_argument("-O", "--alias", dest="alias",
+                         metavar="ALIAS",
+                         help="Expose this dump as {ALIAS} to the parent template "
+                              "(max 1 per level).")
     grp_out.add_argument("-u", "--wrap", dest="wrap_lang", metavar="LANG",
                          help="Fence every chunk inside ```LANG``` blocks.")
     grp_out.add_argument("-l", "--list", dest="list_only", action="store_true",
@@ -314,33 +318,32 @@ def _build_parser() -> argparse.ArgumentParser:
                          action="store_true",
                          help="Omit route header lines (===== path =====).")
 
-    grp_out.add_argument("-k", "--alias", dest="alias",
-                         metavar="ALIAS",
-                         help="Expose this dump as {ALIAS} to the parent template "
-                              "(max 1 per level).")
-    grp_out.add_argument("-K", "--env", dest="env_vars", action="append",
+    grp_out.add_argument("-e", "--env", dest="env_vars", action="append",
                          metavar="VAR=VAL",
-                         help="Define VAR for template interpolation (requires -t).")
+                         help="Define VAR for template interpolation.")
+    grp_out.add_argument("-E", "--global-env", dest="global_env_vars", action="append",
+                         metavar="VAR=VAL",
+                         help="Define VAR for template interpolation.")
 
     # ── AI
-    grp_ai.add_argument("-Q", "--ai", dest="ai", action="store_true",
+    grp_ai.add_argument("--ai", dest="ai", action="store_true",
                         help="Send rendered dump to OpenAI and write reply to --output.")
-    grp_ai.add_argument("-m", "--ai-model", dest="ai_model",
+    grp_ai.add_argument("--ai-model", dest="ai_model",
                         default=DEFAULT_OPENAI_MODEL, metavar="MODEL",
                         help=f"OpenAI model (default: {DEFAULT_OPENAI_MODEL}).")
-    grp_ai.add_argument("-T", "--temperature", dest="temperature",
+    grp_ai.add_argument("--ai-temperature", dest="temperature",
                         type=float, default=1.0, metavar="NUM",
                         help="OpenAI sampling temperature.")
-    grp_ai.add_argument("-B", "--top-p", dest="top_p",
+    grp_ai.add_argument("--ai-top-p", dest="top_p",
                         type=float, metavar="NUM",
                         help="OpenAI nucleus-sampling probability top_p.")
-    grp_ai.add_argument("-R", "--presence-penalty", dest="presence_penalty",
+    grp_ai.add_argument("--ai-presence-penalty", dest="presence_penalty",
                         type=float, metavar="NUM",
                         help="OpenAI presence penalty.")
-    grp_ai.add_argument("-F", "--frequency-penalty", dest="frequency_penalty",
+    grp_ai.add_argument("--ai-frequency-penalty", dest="frequency_penalty",
                         type=float, metavar="NUM",
                         help="OpenAI frequency penalty.")
-    grp_ai.add_argument("-M", "--ai-system-prompt", dest="ai_system_prompt",
+    grp_ai.add_argument("--ai-system-prompt", dest="ai_system_prompt",
                         metavar="FILE", help="Override the built-in system prompt.")
 
     # ── Misc
