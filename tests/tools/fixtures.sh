@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# fixtures.sh – Build the complete fixture tree for ghconcat test-suite
-# Flags updated to final nomenclature (spec v2, 2025-07-26)
+# fixtures.sh – Build the complete fixture tree for ghconcat test‑suite
+# Spec v2, 2025‑08‑01  (extended)
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -18,7 +18,8 @@ mkdir -p \
   "$ROOT/extra/nested" \
   "$ROOT/build" \
   "$ROOT/.hidden" \
-  "$ROOT/exclude_me"
+  "$ROOT/exclude_me" \
+  "$ROOT/ai"
 
 # ---------- Base fixtures ------------------------------------------------------
 cat > "$ROOT/src/module/alpha.py" <<'PY'
@@ -101,7 +102,7 @@ GCX
 cat > "$ROOT/batch.gcx" <<'GCX'
 -a extra
 -g go
--k BATCH_DUMP
+-O BATCH_DUMP
 GCX
 
 echo "suffix test" > "$ROOT/src/module/file.testext"
@@ -131,6 +132,27 @@ cat > "$ROOT/src/module/only_comments.py" <<'PY'
 # comments
 PY
 
+
+# ---------- Seeds for AI tests -------------------------------------------------
+cat > "$ROOT/ai/seeds.jsonl" <<'JSONL'
+{"role": "user", "content": "Seed 1"}
+{"role": "assistant", "content": "Reply 1"}
+JSONL
+
+# ---------- Templates ----------------------------------------------------------
+cat > "$ROOT/base.tpl" <<'TPL'
+<!-- BASE -->
+{dump_data}
+TPL
+
+cat > "$ROOT/child.tpl" <<'TPL'
+<!-- CHILD -->
+{dump_data}
+TPL
+cat > "$ROOT/tpl_env.md" <<'TPL'
+**{project}**
+{dump_data}
+TPL
 echo "unknown ext" > "$ROOT/extra/sample.fooext"
 
 cat > "$ROOT/batch_ws.gcx" <<'GCX'
@@ -143,18 +165,54 @@ GCX
 cat > "$ROOT/inline_wrap.gcx" <<'GCX'
 -a "src/module/ünicode dir/file with space.js"
 -g js
--u js
+-a src/module
 GCX
 
 mkdir -p "$ROOT/src/.private/inner"
 echo "print('hidden nested')" > "$ROOT/src/.private/inner/nested.py"
+cat > "$ROOT/xA.gcx" <<'GCX'
+-g js
+-a src/module
+GCX
+cat > "$ROOT/xB.gcx" <<'GCX'
+-g xml
+-a src/module/omega.xml
+GCX
+cat > "$ROOT/disable_n.gcx" <<'GCX'
+-n 5
+-a src/module/large.py
+GCX
+cat > "$ROOT/env_child.gcx" <<'GCX'
+-a $base/module/alpha.py
+-O childdump
+GCX
+cat > "$ROOT/override_project.gcx" <<'GCX'
+-E project=Bar
+-t tpl_env.md
+-a src/other/beta.py
+GCX
 
-# ---------- Extended directive fixtures ---------------------------------------
+# ---------- Inline‑context directive file using “[alias]” ----------------------
+cat > "$ROOT/inline_parent.gcx" <<'GCX'
+-a src/module/charlie.js
+[mini]
+-a src/module/omega.xml
+-g xml
+-O mini
+GCX
+
+# ---------- Workspaces for nested tests ---------------------------------------
+mkdir -p "$ROOT/ws_tpl"
+cat > "$ROOT/ws_tpl/alt.tpl" <<'TPL'
+ALT‑TPL
+{dump_data}
+TPL
+
+# ---------- Extended directive fixtures from original script ------------------
 mkdir -p "$ROOT/ws1/src/other" "$ROOT/ws2/src/module"
 cp -a "$ROOT/src/other/."          "$ROOT/ws1/src/other/"
 cp    "$ROOT/src/module/echo.dart" "$ROOT/ws2/src/module/"
 
-# Inline -x files (now used with -X)
 cat > "$ROOT/inline1.gcx" <<'GCX'
 -a src/module/charlie.js
 -g js
@@ -170,8 +228,6 @@ cat > "$ROOT/inline3.gcx" <<'GCX'
 -a extra/sample.go
 -g go
 GCX
-
-# Batch files
 cat > "$ROOT/batch1.gcx" <<'GCX'
 -w ws1
 -a src/other
@@ -180,13 +236,13 @@ cat > "$ROOT/batch1.gcx" <<'GCX'
 -N 3
 GCX
 cat > "$ROOT/batch2.gcx" <<'GCX'
--r src
+-a src
 -a other/delta.js
 -g js
 GCX
 cat > "$ROOT/batch3.gcx" <<'GCX'
 -w ws2
--r src
+-a src
 -a module/echo.dart
 -g dart
 GCX
