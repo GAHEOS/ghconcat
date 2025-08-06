@@ -501,6 +501,84 @@ class AIInheritanceTests(Base):
             _run(["-x", "ai_parent.gctx"])
         self.assertEqual(calls, 1, "Se esperaba una única llamada IA")
 
+# --------------------------------------------------------------------------- #
+#  20. -L overrides -l                                                        #
+# --------------------------------------------------------------------------- #
+class ListOverrideTests(GhConcatBaseTest):
+    """Verify that the new -L flag cancels the behaviour of -l."""
+
+    def test_l_produces_listing(self) -> None:
+        """Sanity-check the original -l behaviour."""
+        dump = _run(["-l", "-s", ".py", "-a", "src/module/alpha.py"])
+        self.assertEqual(
+            dump.strip(),
+            "src/module/alpha.py",
+            "-l should output only the relative file path",
+        )
+
+    def test_L_cancels_l(self) -> None:
+        """When both flags are present, -L wins and the file is concatenated."""
+        dump = _run(["-l", "-L", "-s", ".py", "-a", "src/module/alpha.py"])
+        self.assertInDump("def alpha", dump)          # file body present
+        self.assertNotEqual(
+            dump.strip(),
+            "src/module/alpha.py",
+            "-L must suppress the plain-listing output introduced by -l",
+        )
+
+    def test_L_alone_behaves_like_default(self) -> None:
+        """Passing only -L should behave exactly as if no listing flags were used."""
+        dump = _run(["-L", "-s", ".py", "-a", "src/module/alpha.py"])
+        self.assertInDump("def alpha", dump)
+        self.assertNotInDump("\nsrc/module/alpha.py\n", dump)  # no bare listing
+
+# --------------------------------------------------------------------------- #
+# 21. Environment-variable resolution & propagation                           #
+# --------------------------------------------------------------------------- #
+class EnvPropagationTests(GhConcatBaseTest):
+    """
+    Verify that «-e/-E» variables work inside the same «-x» unit and that
+    only -E travels to nested contexts.
+    """
+
+    def test_local_env_used_same_context(self) -> None:
+        d = FIXTURES / "env_same.gctx"
+        d.write_text("""
+            -e root=.
+            -w $root
+            -h
+            -a src/module/alpha.py
+            -s .py
+        """, encoding="utf-8")
+        dump = _run(["-x", str(d)])
+        # Path appears, proving $root was expanded
+        self.assertInDump("src/module/alpha.py", dump)
+
+    def test_global_env_inherited(self) -> None:
+        d = FIXTURES / "env_global.gctx"
+        d.write_text("""
+            -E root=src
+            [child]
+            -h
+            -a $root/module/alpha.py
+            -s .py
+        """, encoding="utf-8")
+        dump = _run(["-x", str(d)])
+        # Child context receives $root
+        self.assertInDump("src/module/alpha.py", dump)
+
+    def test_local_env_not_inherited(self) -> None:
+        d = FIXTURES / "env_local.gctx"
+        d.write_text("""
+            -e root=src
+            [child]
+            -h
+            -a $root/module/alpha.py
+            -s .py
+        """, encoding="utf-8")
+        dump = _run(["-x", str(d)])
+        # Child did NOT inherit, so no alpha.py path makes it through
+        self.assertNotInDump("alpha.py", dump)
 
 # --------------------------------------------------------------------------- #
 #  Utility for writing small template files                                   #

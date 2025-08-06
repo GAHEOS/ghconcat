@@ -284,80 +284,248 @@ def _refresh_env_values(env_map: Dict[str, str]) -> None:
 # ─────────────────────── argparse builder (no “‑X”)  ────────────────────────
 def _build_parser() -> argparse.ArgumentParser:
     """
-    Build and return an `argparse.ArgumentParser` suitable for a single
-    context block.
+    Construct and return an `argparse.ArgumentParser` instance for **one**
+    context block.  The parser intentionally omits any legacy GAHEOS v1
+    switches and follows GAHEOS v2 semantics exclusively.
     """
     p = argparse.ArgumentParser(
         prog="ghconcat",
         formatter_class=argparse.RawTextHelpFormatter,
-        usage="%(prog)s [‑x FILE] … [OPTIONS]",
+        usage="%(prog)s [-x FILE] … [OPTIONS]",
         add_help=False,
+        description=(
+            "ghconcat – multi-level concatenation, slicing & templating tool\n"
+            "Everything after a “-x FILE” is parsed inside the directive-file "
+            "context unless another “-x” is encountered."
+        ),
     )
 
-    # ── groups
+    # ── option groups (keep logical order) ────────────────────────────────
     g_loc = p.add_argument_group("Discovery")
     g_rng = p.add_argument_group("Line slicing")
     g_cln = p.add_argument_group("Cleaning")
     g_tpl = p.add_argument_group("Template & output")
     g_ai = p.add_argument_group("AI integration")
-    g_misc = p.add_argument_group("Misc")
+    g_misc = p.add_argument_group("Miscellaneous")
 
     # ── discovery
-    g_loc.add_argument("-w", "--workdir", dest="workdir", metavar="DIR")
-    g_loc.add_argument("-W", "--workspace", dest="workspace", metavar="DIR")
-    g_loc.add_argument("-a", "--add-path", action="append", dest="add_path", metavar="PATH")
-    g_loc.add_argument("-A", "--exclude-path", action="append", dest="exclude_path", metavar="DIR")
-    g_loc.add_argument("-s", "--suffix", action="append", dest="suffix", metavar="SUF")
-    g_loc.add_argument("-S", "--exclude-suffix", action="append", dest="exclude_suf", metavar="SUF")
+    g_loc.add_argument(
+        "-w", "--workdir", metavar="DIR", dest="workdir",
+        help=(
+            "Root directory **containing the content files**. "
+            "Relative paths are resolved against the current working directory "
+            "(or against the parent context if inside a [context] block)."
+        ),
+    )
+    g_loc.add_argument(
+        "-W", "--workspace", metavar="DIR", dest="workspace",
+        help=(
+            "Workspace directory for **templates, prompts and output files**. "
+            "Relative paths are resolved against the current −w. "
+            "When omitted, it defaults to the workdir."
+        ),
+    )
+    g_loc.add_argument(
+        "-a", "--add-path", metavar="PATH", action="append", dest="add_path",
+        help=(
+            "Add a file *or* directory to the inclusion set. "
+            "May be passed multiple times; directories are scanned recursively."
+        ),
+    )
+    g_loc.add_argument(
+        "-A", "--exclude-path", metavar="DIR", action="append",
+        dest="exclude_path",
+        help=(
+            "Exclude an entire directory tree from discovery, even if it was "
+            "added by a broader −a.  Multiple use is allowed."
+        ),
+    )
+    g_loc.add_argument(
+        "-s", "--suffix", metavar="SUF", action="append", dest="suffix",
+        help=(
+            "Include files with this suffix (e.g. “.py”). "
+            "Can be specified many times; at least one −s implies a positive "
+            "filter (everything else is ignored unless explicitly added)."
+        ),
+    )
+    g_loc.add_argument(
+        "-S", "--exclude-suffix", metavar="SUF", action="append",
+        dest="exclude_suf",
+        help=(
+            "Exclude files with this suffix.  Explicit files given with −a "
+            "always win over exclusions."
+        ),
+    )
 
-    # ── line range
-    g_rng.add_argument("-n", "--total-lines", dest="total_lines", type=int, metavar="NUM")
-    g_rng.add_argument("-N", "--start-line", dest="first_line", type=int, metavar="LINE")
-    g_rng.add_argument("-m", "--keep-first-line", dest="first_flags",
-                       action="append_const", const="keep")
-    g_rng.add_argument("-M", "--no-first-line", dest="first_flags",
-                       action="append_const", const="drop")
+    # ── line slicing
+    g_rng.add_argument(
+        "-n", "--total-lines", metavar="NUM", type=int, dest="total_lines",
+        help=(
+            "Limit each file to *NUM* lines (after header adjustments). "
+            "Combines with −N to create sliding windows."
+        ),
+    )
+    g_rng.add_argument(
+        "-N", "--start-line", metavar="LINE", type=int, dest="first_line",
+        help="Start concatenation from this 1-based line number.",
+    )
+    g_rng.add_argument(
+        "-m", "--keep-first-line", dest="first_flags",
+        action="append_const", const="keep",
+        help="Preserve the very first line even when −N > 1.",
+    )
+    g_rng.add_argument(
+        "-M", "--no-first-line", dest="first_flags",
+        action="append_const", const="drop",
+        help="Force-drop the very first line irrespective of −N.",
+    )
 
     # ── cleaning
-    g_cln.add_argument("-c", "--remove-comments", dest="rm_simple", action="store_true")
-    g_cln.add_argument("-C", "--remove-all-comments", dest="rm_all", action="store_true")
-    g_cln.add_argument("-i", "--remove-import", dest="rm_import", action="store_true")
-    g_cln.add_argument("-I", "--remove-export", dest="rm_export", action="store_true")
-    g_cln.add_argument("-B", "--keep-blank", dest="blank_flags",
-                       action="append_const", const="keep")
-    g_cln.add_argument("-b", "--strip-blank", dest="blank_flags",
-                       action="append_const", const="strip")
+    g_cln.add_argument(
+        "-c", "--remove-comments", action="store_true", dest="rm_simple",
+        help="Strip *inline* comments (language-aware).",
+    )
+    g_cln.add_argument(
+        "-C", "--remove-all-comments", action="store_true", dest="rm_all",
+        help="Strip **all** comments, including full-line ones.",
+    )
+    g_cln.add_argument(
+        "-i", "--remove-import", action="store_true", dest="rm_import",
+        help="Remove Python/JS/Dart import statements.",
+    )
+    g_cln.add_argument(
+        "-I", "--remove-export", action="store_true", dest="rm_export",
+        help="Remove export / module-export statements.",
+    )
+    g_cln.add_argument(
+        "-B", "--keep-blank", dest="blank_flags",
+        action="append_const", const="keep",
+        help="Keep blank lines (overrides −b in the same scope).",
+    )
+    g_cln.add_argument(
+        "-b", "--strip-blank", dest="blank_flags",
+        action="append_const", const="strip",
+        help="Remove blank lines unless a sibling −B is present.",
+    )
 
     # ── template & output
-    g_tpl.add_argument("-t", "--template", dest="template", metavar="FILE")
-    g_tpl.add_argument("-o", "--output", dest="output", metavar="FILE")
-    g_tpl.add_argument("-u", "--wrap", dest="wrap_lang", metavar="LANG")
-    g_tpl.add_argument("-U", "--no-wrap", dest="unwrap", action="store_true")
-    g_tpl.add_argument("-h", "--header", dest="hdr_flags",
-                       action="append_const", const="show")
-    g_tpl.add_argument("-H", "--no-headers", dest="hdr_flags",
-                       action="append_const", const="hide")
-    g_tpl.add_argument("-r", "--relative-path", dest="path_flags",
-                       action="append_const", const="relative")
-    g_tpl.add_argument("-R", "--absolute-path", dest="path_flags",
-                       action="append_const", const="absolute")
-    g_tpl.add_argument("-l", "--list", dest="list_only", action="store_true")
-    g_tpl.add_argument("-e", "--env", dest="env_vars", action="append", metavar="VAR=VAL")
-    g_tpl.add_argument("-E", "--global-env", dest="global_env", action="append", metavar="VAR=VAL")
+    g_tpl.add_argument(
+        "-t", "--template", metavar="FILE", dest="template",
+        help=(
+            "Render the concatenation through this Jinja-lite template. "
+            "All per-context variables and $env are available as placeholders."
+        ),
+    )
+    g_tpl.add_argument(
+        "-o", "--output", metavar="FILE", dest="output",
+        help="Write final result to FILE (path resolved against −W).",
+    )
+    g_tpl.add_argument(
+        "-u", "--wrap", metavar="LANG", dest="wrap_lang",
+        help=(
+            "Wrap each concatenated file in a fenced code-block using LANG "
+            "as the info-string.  Use −U to cancel in a child context."
+        ),
+    )
+    g_tpl.add_argument(
+        "-U", "--no-wrap", action="store_true", dest="unwrap",
+        help="Cancel any inherited −u/-wrap directive.",
+    )
+    g_tpl.add_argument(
+        "-h", "--header", dest="hdr_flags",
+        action="append_const", const="show",
+        help="Emit a heavy banner header before each file.",
+    )
+    g_tpl.add_argument(
+        "-H", "--no-headers", dest="hdr_flags",
+        action="append_const", const="hide",
+        help="Suppress heavy headers in this scope.",
+    )
+    g_tpl.add_argument(
+        "-r", "--relative-path", dest="path_flags",
+        action="append_const", const="relative",
+        help="Print header paths relative to the −w directory (default).",
+    )
+    g_tpl.add_argument(
+        "-R", "--absolute-path", dest="path_flags",
+        action="append_const", const="absolute",
+        help="Print header paths as absolute filesystem paths.",
+    )
+    g_tpl.add_argument(
+        "-l", "--list", action="store_true", dest="list_only",
+        help=(
+            "List matching filenames **instead of** their contents "
+            "(one path per line)."
+        ),
+    )
+    g_tpl.add_argument(
+        "-L", "--no-list", action="store_true", dest="no_list",
+        help=(
+            "Cancel an inherited −l/--list directive.  When both −l and −L "
+            "are present at the same context level, −L wins."
+        ),
+    )
+    g_tpl.add_argument(
+        "-e", "--env", metavar="VAR=VAL", action="append", dest="env_vars",
+        help=(
+            "Define a *local* placeholder variable visible only in the "
+            "current context.  Variables may reference previously defined "
+            "ones with the $VAR syntax."
+        ),
+    )
+    g_tpl.add_argument(
+        "-E", "--global-env", metavar="VAR=VAL", action="append",
+        dest="global_env",
+        help="Define a *global* variable visible in every nested context.",
+    )
 
-    # ── AI
-    g_ai.add_argument("--ai", action="store_true")
-    g_ai.add_argument("--ai-model", default=DEFAULT_OPENAI_MODEL, metavar="MODEL")
-    g_ai.add_argument("--ai-temperature", type=float, metavar="NUM")
-    g_ai.add_argument("--ai-top-p", type=float, metavar="NUM")
-    g_ai.add_argument("--ai-presence-penalty", type=float, metavar="NUM")
-    g_ai.add_argument("--ai-frequency-penalty", type=float, metavar="NUM")
-    g_ai.add_argument("--ai-system-prompt", metavar="FILE")
-    g_ai.add_argument("--ai-seeds", metavar="FILE")
+    # ── AI integration
+    g_ai.add_argument(
+        "--ai", action="store_true",
+        help=(
+            "Send the rendered text to an OpenAI chat endpoint.  Requires "
+            "OPENAI_API_KEY in the environment.  Output is saved to −o (or a "
+            "temp file when −o is omitted) and assigned to _ia_<ctx>."
+        ),
+    )
+    g_ai.add_argument(
+        "--ai-model", metavar="MODEL", default=DEFAULT_OPENAI_MODEL,
+        help="OpenAI chat model to use (default: %(default)s).",
+    )
+    g_ai.add_argument(
+        "--ai-temperature", type=float, metavar="NUM",
+        help="Sampling temperature for non-o3 models (0–2).",
+    )
+    g_ai.add_argument(
+        "--ai-top-p", type=float, metavar="NUM",
+        help="Top-p nucleus sampling parameter.",
+    )
+    g_ai.add_argument(
+        "--ai-presence-penalty", type=float, metavar="NUM",
+        help="Presence-penalty parameter.",
+    )
+    g_ai.add_argument(
+        "--ai-frequency-penalty", type=float, metavar="NUM",
+        help="Frequency-penalty parameter.",
+    )
+    g_ai.add_argument(
+        "--ai-system-prompt", metavar="FILE",
+        help="System prompt file to prepend to the chat.",
+    )
+    g_ai.add_argument(
+        "--ai-seeds", metavar="FILE",
+        help="File containing JSONL seed messages to prime the chat.",
+    )
 
-    # ── misc
-    g_misc.add_argument("--upgrade", action="store_true")
-    g_misc.add_argument("--help", action="help")
+    # ── miscellaneous
+    g_misc.add_argument(
+        "--upgrade", action="store_true",
+        help="Self-update ghconcat from the official GAHEOS repository.",
+    )
+    g_misc.add_argument(
+        "--help", action="help",
+        help="Show this help message and exit.",
+    )
 
     return p
 
@@ -365,13 +533,13 @@ def _build_parser() -> argparse.ArgumentParser:
 # ───────────────────────  Namespace post‑processing  ────────────────────────
 def _post_parse(ns: argparse.Namespace) -> None:
     """
-    Normalize tri‑state flags after `parse_args` has run.
+    Normalize tri-state flags after `parse_args` has run.
     """
-    # Blank‑line policy
+    # Blank-line policy
     flags = set(ns.blank_flags or [])
     ns.keep_blank = "keep" in flags or "strip" not in flags
 
-    # First‑line policy
+    # First-line policy
     first = set(ns.first_flags or [])
     if "drop" in first:
         ns.keep_header = False
@@ -389,6 +557,10 @@ def _post_parse(ns: argparse.Namespace) -> None:
     # Wrap fences
     if ns.unwrap:
         ns.wrap_lang = None
+
+    # List / no-list override
+    if getattr(ns, "no_list", False):
+        ns.list_only = False
 
 
 # ─────────────────────────  Utility helpers  ────────────────────────────────
@@ -751,6 +923,7 @@ def _parse_env_items(items: Optional[List[str]]) -> Dict[str, str]:
     return env_map
 
 
+# ─────────────────────────────  Core executor  ──────────────────────────────
 def _execute_node(
         node: DirNode,
         ns_parent: Optional[argparse.Namespace],
@@ -762,38 +935,58 @@ def _execute_node(
         gh_dump: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, str], str]:
     """
-    Recursive executor. Returns *(vars, final_output)* for *node*.
+    Recursive executor.  Returns *(vars, final_output)* for *node*.
+
+    Key change (2025-08-06)
+    -----------------------
+    * «-e» (local env) **is no longer propagated** to child contexts – only
+      «-E» definitions travel downwards.  Nevertheless, both kinds of
+      variables can already be referenced **inside the same context block**
+      (e.g. `-e root='.'  -w $root`).
     """
     inherited_vars = inherited_vars or {}
-    tokens = _expand_tokens(node.tokens, inherited_vars)
+
+    # 0️⃣ First expansion pass so we can *parse* the flags
+    tokens = _expand_tokens(node.tokens, inherited_env=inherited_vars)
+
     ns_self = _build_parser().parse_args(tokens)
     _post_parse(ns_self)
+
+    # 1️⃣ Effective namespace after inheritance
     ns_effective = _merge_ns(ns_parent, ns_self) if ns_parent else ns_self
 
+    # 2️⃣ Workspace & workdir resolution
     if level == 0:
         gh_dump = []
-        _SEEN_FILES.clear()  # header de‑dup reset
+        _SEEN_FILES.clear()                       # header de-dup
 
     root_base = parent_root or Path.cwd()
     root = _resolve_path(root_base, ns_effective.workdir or ".")
 
     workspace = (
         _resolve_path(parent_workspace or root, ns_effective.workspace)
-        if ns_effective.workspace
-        else root
+        if ns_effective.workspace else root
     )
     if not root.exists():
         _fatal(f"--workdir {root} not found")
     if not workspace.exists():
         _fatal(f"--workspace {workspace} not found")
 
-    # ── env ---------------------------------------------------------------
-    vars_local: Dict[str, str] = dict(inherited_vars)
-    vars_local.update(_parse_env_items(ns_effective.global_env))
-    vars_local.update(_parse_env_items(ns_effective.env_vars))
+    # 3️⃣ Environment-variable scopes
+    global_env_map = _parse_env_items(ns_effective.global_env)      # -E
+    local_env_map  = _parse_env_items(ns_effective.env_vars)        # -e
+
+    inherited_for_children: Dict[str, str] = {
+        **inherited_vars,        # from parent
+        **global_env_map,        # propagate downwards
+    }
+    vars_local: Dict[str, str] = {
+        **inherited_for_children,
+        **local_env_map,         # visible only in *this* context
+    }
     ctx_name = node.name
 
-    # ── RAW CONCAT --------------------------------------------------------
+    # 4️⃣ Raw concatenation phase ------------------------------------------------
     dump_raw = ""
     if ns_effective.add_path:
         files = _gather_files(
@@ -808,34 +1001,32 @@ def _execute_node(
             suffixes=_split_list(ns_effective.suffix),
             exclude_suf=_split_list(ns_effective.exclude_suf),
         )
+
         if files:
-            wrapped: Optional[List[Tuple[str, str]]] = (
-                [] if ns_effective.wrap_lang else None
-            )
+            wrapped: Optional[List[Tuple[str, str]]] = [] if ns_effective.wrap_lang else None
             dump_raw = _concat_files(files, ns_effective, header_root=root, wrapped=wrapped)
+
+            # optional fenced wrapping
             if ns_effective.wrap_lang and wrapped:
-                fenced = []
+                fenced: List[str] = []
                 for hp, body in wrapped:
-                    hdr = (
-                        ""
-                        if ns_effective.skip_headers
-                        else f"{HEADER_DELIM}{hp} {HEADER_DELIM}\n"
-                    )
+                    hdr = "" if ns_effective.skip_headers else f"{HEADER_DELIM}{hp} {HEADER_DELIM}\n"
                     fenced.append(
                         f"{hdr}```{ns_effective.wrap_lang or Path(hp).suffix.lstrip('.')}\n"
                         f"{body}\n```\n"
                     )
                 dump_raw = "".join(fenced)
 
+    # 4.1 Expose raw values in variable space
     if ctx_name:
         vars_local[f"_r_{ctx_name}"] = dump_raw
         vars_local[ctx_name] = dump_raw
     if gh_dump is not None:
         gh_dump.append(dump_raw)
 
-    _refresh_env_values(vars_local)  # after concat
+    _refresh_env_values(vars_local)     # after raw concat
 
-    # ── CHILD CONTEXTS ----------------------------------------------------
+    # 5️⃣ Child contexts ---------------------------------------------------------
     for child in node.children:
         child_vars, _ = _execute_node(
             child,
@@ -843,14 +1034,14 @@ def _execute_node(
             level=level + 1,
             parent_root=root,
             parent_workspace=workspace,
-            inherited_vars=vars_local,
+            inherited_vars=inherited_for_children,   # ⬅️  no local «-e» leakage
             gh_dump=gh_dump,
         )
         vars_local.update(child_vars)
 
-    _refresh_env_values(vars_local)  # after children
+    _refresh_env_values(vars_local)     # after children
 
-    # ── TEMPLATE ----------------------------------------------------------
+    # 6️⃣ Template interpolation -------------------------------------------------
     rendered = dump_raw
     if ns_effective.template:
         tpl_path = _resolve_path(workspace, ns_effective.template)
@@ -858,16 +1049,17 @@ def _execute_node(
             _fatal(f"template {tpl_path} not found")
         tpl_text = tpl_path.read_text(encoding="utf-8")
         rendered = _interpolate(
-            tpl_text, {**vars_local, "ghconcat_dump": "".join(gh_dump or [])}
+            tpl_text,
+            {**vars_local, "ghconcat_dump": "".join(gh_dump or [])},
         )
 
     if ctx_name:
         vars_local[f"_t_{ctx_name}"] = rendered
         vars_local[ctx_name] = rendered
 
-    _refresh_env_values(vars_local)  # after template
+    _refresh_env_values(vars_local)     # after template
 
-    # ── AI ----------------------------------------------------------------
+    # 7️⃣ AI phase (unchanged) ----------------------------------------------------
     final_out = rendered
     out_path: Optional[Path] = None
     if ns_effective.output and ns_effective.output.lower() != TOK_NONE:
@@ -875,17 +1067,12 @@ def _execute_node(
 
     if ns_effective.ai:
         if out_path is None:
-            tf = tempfile.NamedTemporaryFile(
-                delete=False, dir=workspace, suffix=".ai.txt"
-            )
+            tf = tempfile.NamedTemporaryFile(delete=False, dir=workspace, suffix=".ai.txt")
             tf.close()
             out_path = Path(tf.name)
 
         sys_prompt = ""
-        if (
-                ns_effective.ai_system_prompt
-                and ns_effective.ai_system_prompt.lower() != TOK_NONE
-        ):
+        if ns_effective.ai_system_prompt and ns_effective.ai_system_prompt.lower() != TOK_NONE:
             spath = _resolve_path(workspace, ns_effective.ai_system_prompt)
             if not spath.exists():
                 _fatal(f"system prompt {spath} not found")
@@ -895,13 +1082,8 @@ def _execute_node(
         if ns_effective.ai_seeds and ns_effective.ai_seeds.lower() != TOK_NONE:
             seeds = _resolve_path(workspace, ns_effective.ai_seeds)
 
-        # Dynamic call – eases unittest.mock patching
-        if "ghconcat" in sys.modules:
-            _call_openai_safe = getattr(sys.modules["ghconcat"], "_call_openai")
-        else:
-            _call_openai_safe = _call_openai
-
-        _call_openai_safe(
+        (_call_openai if "ghconcat" not in sys.modules else
+         getattr(sys.modules["ghconcat"], "_call_openai"))(
             rendered,
             out_path,
             model=ns_effective.ai_model,
@@ -918,18 +1100,17 @@ def _execute_node(
         vars_local[f"_ia_{ctx_name}"] = final_out
         vars_local[ctx_name] = final_out
 
-    _refresh_env_values(vars_local)  # after AI
+    _refresh_env_values(vars_local)     # after AI
 
-    # ── OUTPUT ------------------------------------------------------------
+    # 8️⃣ Output-file write (unchanged) ------------------------------------------
     if out_path and not ns_effective.ai:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(final_out, encoding="utf-8")
         print(f"✔ Output written → {out_path}")
 
-    # Root‑level synthetic output (if nothing else captured it)
+    # Synthetic root-level dump
     if level == 0 and final_out == "" and gh_dump:
         final_out = "".join(gh_dump)
-
     if level == 0 and gh_dump is not None:
         vars_local["ghconcat_dump"] = "".join(gh_dump)
 

@@ -1,34 +1,37 @@
 # ghconcat
 
-> **Multi‑language file concatenator with hierarchical batching, line‑range slicing, advanced clean‑up,
-> OpenAI off‑loading and rock‑solid determinism – all in one pure‑Python script.**
+> **Hierarchical, language‑agnostic file concatenator · ultra‑deterministic · zero external deps**
 
-`ghconcat` walks your project tree, selects just the files you care about, **strips the noise**, optionally
-slices by line range and concatenates everything into a single, reproducible dump.  
-Use that dump for code‑review diffs, as a large‑context window for LLMs, to feed static‑analysis tools or to build
-traceable artefacts in CI.
+`ghconcat` walks your project tree, selects only the files you care about, **strips the noise** (comments, imports,
+blank
+lines, etc.), applies optional line‑range slicing and concatenates the result into a single, reproducible dump.  
+Typical use‑cases:
+
+* Giant but clean prompts for LLMs.
+* Traceable artefacts in CI/CD.
+* Code‑review bundles that stay line‑number‑stable.
+* A *source of truth* you can embed in docs or knowledge bases.
 
 ---
 
 ## 0 · TL;DR – Quick Cheat‑Sheet
 
 ```bash
-# 1 ─ 100‑line summary of every .py & .xml under addons/ and web/, Markdown‑wrapped,
-#     routed through OpenAI and saved in ai/reply.md:
-ghconcat -g py -g xml -C -i -n 100 \
+# 1 ─ Create a 120‑line dump per file for .py + .xml under addons/ and web/,
+#     wrap each chunk in Markdown fences, pipe through OpenAI and save the
+#     reply in ai/reply.md:
+ghconcat -s .py -s .xml -C -i -n 120 \
          -a addons -a web \
+         -u markdown \
          -t ai/prompt.tpl \
          --ai --ai-model o3 \
          -o ai/reply.md
 
-# 2 ─ Same discovery rules, but list **paths only** (dry‑run):
-ghconcat -g py -g xml -a addons -l
+# 2 ─ Same discovery rules, but "dry‑run": list absolute paths only
+ghconcat -s .py -s .xml -a addons -l -R
 
-# 3 ─ “CI bundle” that stitches three independent jobs together:
-ghconcat -X conf/ci_backend.gcx \
-         -X conf/ci_frontend.gcx \
-         -X conf/ci_assets.gcx \
-         -o build/ci_bundle.txt
+# 3 ─ Fully declarative multi‑step pipeline with contexts
+ghconcat -x conf/pipeline.gctx -o build/artifact.txt
 ````
 
 ---
@@ -36,292 +39,222 @@ ghconcat -X conf/ci_backend.gcx \
 ## Table of Contents
 
 1. [Philosophy](#1--philosophy)
-2. [Feature Matrix](#2--feature-matrix)
+2. [What’s New in v2](#2--whats-new-in-v2)
 3. [Installation](#3--installation)
 4. [Quick Start](#4--quick-start)
-5. [Full CLI Reference](#5--full-cli-reference)
+5. [CLI Reference](#5--cli-reference)
 6. [Conceptual Model](#6--conceptual-model)
-7. [Directive Files `‑x` & `‑X`](#7--directive-files-x--x)
+7. [Directive Files & Contexts](#7--directive-files--contexts)
 8. [Templating & Variables](#8--templating--variables)
-9. [ChatGPT Gateway](#9--chatgpt-gateway)
-10. [Batching & Hierarchical Contexts](#10--batching--hierarchical-contexts)
-11. [Output Strategies & Markdown Wrapping](#11--output-strategies--markdown-wrapping)
-12. [Path Handling & Header Semantics](#12--path-handling--header-semantics)
-13. [Environment Variables & Exit Codes](#13--environment-variables--exit-codes)
-14. [Self‑Upgrade & Version Pinning](#14--selfupgrade--version-pinning)
-15. [Troubleshooting](#15--troubleshooting)
-16. [Recipes](#16--recipes)
-17. [Security & Privacy Notes](#17--security--privacy-notes)
-18. [Performance Tips](#18--performance-tips)
-19. [Contribution Guide](#19--contribution-guide)
-20. [License](#20--license)
+9. [AI Gateway](#9--ai-gateway)
+10. [Workspaces & Outputs](#10--workspaces--outputs)
+11. [Recipes](#11--recipes)
+12. [Migrating from v1](#12--migrating-from-v1)
+13. [Troubleshooting](#13--troubleshooting)
+14. [Environment & Exit Codes](#14--environment--exit-codes)
+15. [Contribution Guide](#15--contribution-guide)
+16. [License](#16--license)
 
 ---
 
 ## 1 · Philosophy
 
-| Principle                    | Rationale                                                                                                 |
-|------------------------------|-----------------------------------------------------------------------------------------------------------|
-| **Single‑command context**   | Stop opening a dozen files just to understand a PR – the dump is human‑readable and line‑number stable.   |
-| **Deterministic output**     | Same input ⇒ same dump. Perfect for CI diffing and caching.                                               |
-| **Composable orchestration** | Mix quick one‑liners, inline bundles (`‑x`) and hierarchical jobs (`‑X`) without sacrificing readability. |
-| **Read‑only safety**         | The tool never writes to your sources; everything happens in memory or to a chosen `‑o` path.             |
-| **AI‑first workflow**        | Seamless bridge to OpenAI with JSONL seeds, system prompts, alias interpolation and timeout protection.   |
-| **Zero external deps**       | Pure Python ≥3.8; only the ChatGPT bridge is optional (`pip install openai`).                             |
-| **Cross‑platform**           | Linux, macOS, Windows (PowerShell) – no native extensions, no shell tricks.                               |
+| Principle                | Rationale                                                                            |
+|--------------------------|--------------------------------------------------------------------------------------|
+| **Determinism first**    | Same input ⇒ identical dump – perfect for CI drift detection.                        |
+| **Composable by design** | Mix one‑liners, directive files (`‑x`) and hierarchical contexts in a single script. |
+| **Read‑only & atomic**   | Your sources are never touched; output is written only where you ask (`‑o`).         |
+| **LLM‑ready**            | A single flag (`--ai`) bridges the dump to OpenAI.                                   |
+| **Zero dependencies**    | Pure Python ≥3.8. The OpenAI bridge is optional (`pip install openai`).              |
 
 ---
 
-## 2 · Feature Matrix
+## 2 · What’s New in v2
 
-| Domain               | Highlights                                                                                                                                  |
-|----------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
-| **Discovery**        | Recursive walk, path inclusion/exclusion, suffix filter, skip hidden dirs & files, ignore `*.g.dart`, de‑dup headers across contexts.       |
-| **Language presets** | `odoo`, `flutter`, plus arbitrary extensions & wildcard mixes (`‑g py -g xml -g .csv`).                                                     |
-| **Clean‑up**         | Strip *simple* comments (`‑c`) or *all* comments (`‑C`), imports (`‑i`), exports (`‑I`), optional blank‑line culling (default).             |
-| **Slicing**          | Keep first *n* lines (`‑n`), start at arbitrary line (`‑N`), preserve line‑1 header even if sliced (`‑H`).                                  |
-| **Batching**         | Inline bundles (`‑x`) and hierarchical jobs (`‑X`) with OR/concat inheritance rules, `none` sentinel to disable upstream flags.             |
-| **Templating**       | `{dump_data}` placeholder + unlimited aliases (`‑O`), local (`‑e`) & global (`‑E`) env vars, workspace scoping and `$ENV_VAR` substitution. |
-| **LLM Bridge**       | OpenAI models, 1800s timeout, JSONL seeds, automatic fenced blocks (`‑u lang`), prompt size cut‑off (\~128k tokens).                        |
-| **Output**           | Optional `‑o` file, dry‑run (`‑l`), absolute/relative headers (`‑p`), no‑header mode (`‑P`), Markdown wrap (`‑u`).                          |
-| **Self‑upgrade**     | Atomic `--upgrade` that clones *ghconcat* from GitHub to `~/.bin` and marks it executable.                                                  |
+| Area                 | v1 behaviour                         | **v2 (current)**                                                       |
+|----------------------|--------------------------------------|------------------------------------------------------------------------|
+| **Batching**         | `‑X` (inherited) vs `‑x` (inline)    | **Only `‑x`**; each file is an isolated sandbox, contexts via `[ctx]`. |
+| **Discovery flags**  | `‑g` / `‑G` by language              | **Removed** – use `‑s` / `‑S` by suffix                                |
+| **Whitespace**       | `‑B` kept `\n`; no explicit opposite | `‑b` **strip** and `‑B` **keep** (tri‑state per context)               |
+| **First‑line rules** | `‑M` (keep header when slicing)      | `‑m` **keep**, `‑M` **drop**                                           |
+| **Header banner**    | Always on, disabled with `‑P`        | Off by default. Enable with `‑h`; suppress again with `‑H`.            |
+| **Path style**       | `‑p` absolute / `‑P` no headers      | `‑R` absolute / `‑r` relative (default)                                |
+| **Wrap fences**      | `‑u` enabled, no way to cancel       | `‑u LANG` enables · `‑U` cancels                                       |
+| **List mode**        | `‑l` (list)                          | `‑l` list · `‑L` cancels inherited `‑l`                                |
+| **Env vars**         | `‑e/-E` always propagated            | Now **only `‑E`** is inherited; `‑e` stays local                       |
+| **Self‑upgrade**     | N/A                                  | `--upgrade` pulls the latest tag into `~/.bin/ghconcat`                |
 
 ---
 
 ## 3 · Installation
 
-> Requires Python **3.8+**. The ChatGPT gateway is optional.
-
-### Linux / macOS
+<details>
+<summary><strong>Linux / macOS / WSL</strong></summary>
 
 ```bash
 git clone https://github.com/GAHEOS/ghconcat.git
 cd ghconcat
-python3 setup.py install    # or: pip install .
+python3 -m pip install .
 mkdir -p ~/.bin && cp ghconcat.py ~/.bin/ghconcat && chmod +x ~/.bin/ghconcat
 echo 'export PATH="$HOME/.bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
-ghconcat -h
+ghconcat --help
 ```
 
-### Enable ChatGPT Gateway
+</details>
+
+<details>
+<summary><strong>Optional – enable the OpenAI bridge</strong></summary>
 
 ```bash
-pip install openai
+python3 -m pip install openai
 export OPENAI_API_KEY=sk-********************************
 ```
+
+</details>
 
 ---
 
 ## 4 · Quick Start
 
-| Task                                                                     | Command                                                                                                                  |
-|--------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
-| Dump every **Python** file under `src/` into `dump.txt`                  | `ghconcat -g py -a src -o dump.txt`                                                                                      |
-| Audit an **Odoo add‑on**, strip comments & imports, keep first 100 lines | `ghconcat -g odoo -C -i -n 100 -a addons/sale_extended`                                                                  |
-| Dry‑run (paths only)                                                     | `ghconcat -g odoo -a addons/sale_extended -l`                                                                            |
-| Send compressed dump to ChatGPT using a template, save reply             | `ghconcat -g py -g dart -C -i -a src -t tpl/prompt.md --ai -o reply.md`                                                  |
-| Merge three independent batch jobs                                       | `ghconcat -X ci_backend.gcx -X ci_frontend.gcx -X ci_assets.gcx -o build/ci.txt`                                         |
-| Wrap each chunk in fenced Markdown `js` blocks                           | `ghconcat -g js -u js -a web -o docs/src_of_truth.md`                                                                    |
-| Generate an architectural summary with commit hash interpolation         | `ghconcat -g py -g dart -C -i -a src -t ai/summarise.tpl -e version=$(git rev-parse --short HEAD) --ai -o ai/summary.md` |
+| Goal / Task                                         | Command                                                                                  |
+|-----------------------------------------------------|------------------------------------------------------------------------------------------|
+| Concatenate every **.py** under `src/` → `dump.txt` | `ghconcat -s .py -a src -o dump.txt`                                                     |
+| Audit an **Odoo add‑on** with no comments/imports   | `ghconcat -s .py -C -i -a addons/sale_extended`                                          |
+| Dry‑run (relative listing)                          | `ghconcat -s .py -a addons/sale_extended -l`                                             |
+| Dump `.py + .dart`, wrap and send to ChatGPT        | `ghconcat -s .py -s .dart -C -i -a src -u markdown --ai -t tpl/prompt.md -o ai/reply.md` |
+| Produce a multi‑step artefact via contexts          | `ghconcat -x ci_pipeline.gctx -o build/ci_bundle.txt`                                    |
 
 ---
 
-## 5 · Full CLI Reference
+## 5 · CLI Reference
 
-Flags are grouped thematically; repeatable flags are marked **·**.
+*Repeatable flags are marked **·***
 
-| Category                | Flags & Parameters                                                                  | Description                                                                |
-|-------------------------|-------------------------------------------------------------------------------------|----------------------------------------------------------------------------|
-| **Batch / Nesting**     | `‑x FILE`·                                                                          | Inline bundle – expands before parsing.                                    |
-|                         | `‑X FILE`·                                                                          | Hierarchical context – parsed with inheritance rules (see §10).            |
-| **Location**            | `‑w DIR`                                                                            | Workdir / root for relative paths (default = CWD).                         |
-|                         | `‑W DIR`                                                                            | Workspace for templates, prompts and outputs (default = workdir).          |
-|                         | `‑a PATH`·                                                                          | Include file or directory.                                                 |
-|                         | `‑A PATH`·                                                                          | Exclude file or directory (prefix match).                                  |
-|                         | `‑s SUF`· / `‑S SUF`·                                                               | Include / exclude files by suffix.                                         |
-| **Language Filters**    | `‑g LANG`· / `‑G LANG`·                                                             | Include / exclude language/extension or preset (`odoo`, `flutter`).        |
-| **Line‑range**          | `‑n NUM`                                                                            | Keep at most NUM lines.                                                    |
-|                         | `‑N LINE`                                                                           | 1‑based starting line (used with or without `‑n`).                         |
-|                         | `‑H`                                                                                | Preserve original line 1 even if sliced out.                               |
-| **Clean‑Up**            | `‑c` / `‑C`                                                                         | Remove simple / all comments.                                              |
-|                         | `‑i` / `‑I`                                                                         | Strip import / export statements.                                          |
-|                         | `‑B`                                                                                | Keep blank lines (default = drop).                                         |
-| **Output & Templating** | `‑t FILE` / `‑t none`                                                               | Template with `{dump_data}`; `none` disables upstream template.            |
-|                         | `‑o FILE`                                                                           | Write final output to FILE.                                                |
-|                         | `‑O ALIAS`                                                                          | Expose current dump/render as `${ALIAS}` to parent contexts and templates. |
-|                         | `‑u LANG` / `‑u none`                                                               | Wrap each chunk in fenced `LANG` blocks; `none` cancels inheritance.       |
-|                         | `‑l`                                                                                | List paths only (no body).                                                 |
-|                         | `‑p` / `‑P`                                                                         | Absolute headers / no headers at all.                                      |
-| **Variables**           | `‑e VAR=VAL`·                                                                       | Local env var (current context only).                                      |
-|                         | `‑E VAR=VAL`·                                                                       | Global env var (propagates to children).                                   |
-| **AI Gateway**          | `--ai`                                                                              | Enable ChatGPT call.                                                       |
-|                         | `--ai-model M`                                                                      | OpenAI model (default `o3`).                                               |
-|                         | `--ai-system-prompt FILE`                                                           | Custom system prompt (template‑aware).                                     |
-|                         | `--ai-seeds FILE/none`                                                              | JSONL seeds; `none` disables inheritance.                                  |
-|                         | `--ai-temperature`, `--ai-top-p`, `--ai-presence-penalty`, `--ai-frequency-penalty` | Optional model parameters (ignored on models with fixed temperature).      |
-| **Misc**                | `--upgrade`                                                                         | Self‑upgrade from GitHub.                                                  |
-|                         | `-h`                                                                                | Help.                                                                      |
+| Category                | Flag(s) & Argument(s)                        | Description                                       |
+|-------------------------|----------------------------------------------|---------------------------------------------------|
+| **Discovery**           | `‑w DIR` / `‑W DIR`                          | Content root / workspace for templates & outputs  |
+|                         | `‑a PATH`· / `‑A PATH`·                      | Include / exclude file or directory               |
+|                         | `‑s SUF`· / `‑S SUF`·                        | Include / exclude by suffix (`.py`, `.yml`, …)    |
+| **Line Slicing**        | `‑n NUM`, `‑N LINE`                          | Max lines / start line (1‑based)                  |
+|                         | `‑m` / `‑M`                                  | Keep / drop original line1 if sliced              |
+| **Clean‑up**            | `‑c` / `‑C`                                  | Strip simple / all comments                       |
+|                         | `‑i` / `‑I`                                  | Remove imports / exports                          |
+|                         | `‑b` / `‑B`                                  | Strip / keep blank lines                          |
+| **Templating & Output** | `‑t FILE` / `‑t none`                        | Jinja‑lite template; `none` cancels inheritance   |
+|                         | `‑o FILE`                                    | Write result to file                              |
+|                         | `‑u LANG` / `‑U`                             | Wrap fenced `LANG` blocks / cancel inherited wrap |
+|                         | `‑h` / `‑H`                                  | Show / hide heavy headers                         |
+|                         | `‑r` / `‑R`                                  | Relative / absolute paths in headers              |
+|                         | `‑l` / `‑L`                                  | List mode / cancel inherited list                 |
+|                         | `‑e VAR=VAL`· / `‑E VAR=VAL`·                | Local / global variable                           |
+| **AI Bridge**           | `--ai`                                       | Enable OpenAI call                                |
+|                         | `--ai-model`, `--ai-temperature`, …          | Model parameters                                  |
+|                         | `--ai-system-prompt FILE`, `--ai-seeds FILE` | System prompt & JSONL seeds                       |
+| **Batching**            | `‑x FILE`·                                   | Execute directive file (with contexts)            |
+| **Misc**                | `--upgrade`                                  | Self‑upgrade ghconcat                             |
 
-> *Any value flag can be neutralised in a child context by passing `none`.*
+*Any value‑flag can be neutralised by passing `none` in a child context.*
 
 ---
 
 ## 6 · Conceptual Model
 
 ```
-roots (‑a)  →  path & suffix filters (‑A/‑s/‑S)  →  language set (‑g/‑G)  →  clean‑up  →  slicing  →  dump
-                                                                                 │
-                                                                                 ▼
-                                             templating (‑t)  →  ChatGPT (--ai)  →  output (‑o / alias)
+[a/include] → [A/exclude] → [s/S suffix] → clean‑up → slicing
+                                          ↓
+                       +──────── template (‑t) ──────+
+                       |                             |
+                       |        AI (--ai)            |
+                       +───────────┬─────────────────+
+                                   ↓
+                               output (‑o)
 ```
+
+`‑e/-E` variables and context aliases may be interpolated **at any later stage**.
 
 ---
 
-## 7 · Directive Files `‑x` & `‑X`
+## 7 · Directive Files & Contexts
 
-### 7.1 Inline Bundles `‑x`
+### 7.1 The `‑x` file
 
-* Parsed **before** `argparse` → can define new flags or override CLI.
-* Multiple `‑x` are concatenated in order.
+* Each `‑x` opens an **isolated environment**; its flags do not leak to the next `‑x`.
+* Inside the file, every line is parsed like CLI; contexts are created with `[name]`.
 
-```gcx
-# defaults.gcx
--g odoo
--c -i -n 120
--a addons -a tests
+```gctx
+# global defaults
+-w .
+-s .py -s .yml
+-b
+
+[backend]
+-a src/backend
+-C -i
+
+[frontend]
+-a src/frontend
+-u javascript
 ```
 
-```bash
-ghconcat -x defaults.gcx -G js -a docs -o dump.txt
-```
+**Inheritance rules**
 
-### 7.2 Hierarchical Contexts `‑X`
+| Attribute type | Merge rule                            |
+|----------------|---------------------------------------|
+| Lists          | concatenate (`suffix`, `add_path`, …) |
+| Booleans       | Logical OR (once enabled it stays on) |
+| Scalars        | Child overrides (`‑w`, `‑t`, …)       |
+| Non‑inherited  | `‑o`, `--ai`, `‑U`, `‑L`              |
 
-* File is tokenised exactly like CLI (one context per line).
-* Inheritance rules:
-
-| Attribute type | Merge rule                       |
-|----------------|----------------------------------|
-| Booleans       | Logical **OR** (cannot be unset) |
-| Lists          | Parent + Child (concatenate)     |
-| Scalars        | Child overrides                  |
-| Non‑inherited  | `‑o`, `‑O`, `--ai`, `‑t`         |
-
-* Bracket syntax `[alias]` inside a `.gcx` line creates an **inline sub‑context** equivalent to `‑X __ctx:alias`.
+Local variables (`‑e`) **do not** propagate; global variables (`‑E`) do.
 
 ---
 
 ## 8 · Templating & Variables
 
-* Always available placeholder: **`{dump_data}`**.
-* Every `‑O ALIAS` makes `{ALIAS}` available downstream.
-* `‑e` / `‑E` inject custom key‑values; use `$VAR` inside any directive file for env expansion.
-* Templates are resolved against `--workspace` first, then `--workdir`.
+* Any placeholder `{var}` is replaced with:
+
+    * Context aliases (`[ctx]` exposes `{ctx}`, `{_r_ctx}`, `{_t_ctx}`, `{_ia_ctx}`)
+    * `ghconcat_dump` (the global concatenation across contexts)
+    * Variables from `‑e` (local) and `‑E` (global)
+
+* `$VAR` expansion happens inside flags before parsing.
 
 ---
 
-## 9 · ChatGPT Gateway
+## 9 · AI Gateway
 
-| Aspect            | Detail                                                                                             |
-|-------------------|----------------------------------------------------------------------------------------------------|
-| Activation        | `--ai` flag; requires `OPENAI_API_KEY`.                                                            |
-| System prompt     | `--ai-system-prompt FILE` – template‑aware.                                                        |
-| Seeds             | JSONL lines with `{ "role": "...", "content": "..." }`; inherited unless `--ai-seeds none`.        |
-| Timeout           | 1800s wall‑clock.                                                                                  |
-| Token safety      | Hard stop at ≈128k tokens (≈350k chars) to avoid 413 errors.                                       |
-| Model params      | Temperature, top‑p, presence & frequency penalties (ignored on fixed‑temp models such as `o3`).    |
-| Output handling   | Reply is written to `‑o` if provided, else to a temp file; alias (if any) is updated **after** AI. |
-| Error propagation | Network/quota/format errors → non‑zero exit, original dump untouched.                              |
+| Aspect          | Detail                                                              |
+|-----------------|---------------------------------------------------------------------|
+| Activation      | `--ai` + `OPENAI_API_KEY` in the environment                        |
+| Models          | Any supported by OpenAI (default **o3**)                            |
+| Seeds JSONL     | Inherited unless `--ai-seeds none`                                  |
+| System prompt   | Template‑aware (`--ai-system-prompt`)                               |
+| Timeout         | 1800s wall‑clock                                                    |
+| Output handling | Reply is written to `‑o` (or a temp file) and assigned to `_ia_ctx` |
 
----
-
-## 10 · Batching & Hierarchical Contexts
-
-* You can combine unlimited `‑X` jobs at level 0; nesting deeper than one level is **forbidden** to prevent recursion.
-* Global header de‑duplication works automatically when **no template** is applied at the top level.
-* Child contexts may independently call ChatGPT, set their own templates, or override env vars.
+> ⚠️ The entire rendered prompt is sent to the LLM provider.
 
 ---
 
-## 11 · Output Strategies & Markdown Wrapping
+## 10 · Workspaces & Outputs
 
-* **Relative headers** (default) are ideal for diffs, because paths stay stable when the repo moves.
-* Use `‑p` for absolute paths when converting the dump to HTML with hyperlinks.
-* `‑u LANG` wraps each chunk in fenced \`\`\`\`LANG\`\`\` blocks; good for ChatGPT, Markdown docs, or static sites.
-* Combine `‑l` with `‑p` to obtain a clean manifest of absolute paths for external tooling.
-* `‑P` suppresses headers entirely – useful when the dump will be embedded inside another template that already names
-  files.
+* `‑w` defines the content root to scan.
+* `‑W` is the workspace relative to `‑w` (templates, prompts, outputs).
+* Relative paths inside a context are resolved against the current `‑w` / `‑W`.
 
 ---
 
-## 12 · Path Handling & Header Semantics
-
-* Hidden files/dirs (`.foo`, `.git`, `.private`) are skipped unless explicitly included.
-* `*.g.dart` is ignored by default (generated code); override with `‑s` / `‑S` if needed.
-* `‑H` duplicates original line 1 **only** when it would be otherwise excluded by slicing rules.
-* Passing `none` to any value flag in a child context disables its inherited value (`‑n none`, `‑u none`, etc.).
-
----
-
-## 13 · Environment Variables & Exit Codes
-
-| Variable         | Purpose                                       |
-|------------------|-----------------------------------------------|
-| `OPENAI_API_KEY` | Enables `--ai` gateway.                       |
-| `DEBUG=1`        | Shows Python tracebacks on unexpected errors. |
-
-| Code | Meaning                          |
-|------|----------------------------------|
-| 0    | Success                          |
-| 1    | Fatal error / validation failure |
-| 130  | Interrupted by user (`Ctrl‑C`)   |
-
----
-
-## 14 · Self‑Upgrade & Version Pinning
-
-Run:
-
-```bash
-ghconcat --upgrade
-```
-
-The script clones the latest stable tag to `~/.bin/ghconcat` atomically and makes it executable.
-Automate with `cron(8)`:
-
-```
-0 6 * * MON ghconcat --upgrade >/var/log/ghconcat-up.log 2>&1
-```
-
-For hermetic builds, pin a specific version in your CI by exporting `GHCONCAT_VERSION` and checking it inside your
-pipeline.
-
----
-
-## 15 · Troubleshooting
-
-| Symptom                                                 | Resolution                                                    |
-|---------------------------------------------------------|---------------------------------------------------------------|
-| *“after apply all filters no active extension remains”* | Your `‑g`/`‑G` set filtered everything – adjust the mix.      |
-| Empty dump or missing files                             | Check roots (`‑a`), suffix filter (`‑s`/`‑S`), hidden dirs.   |
-| ChatGPT “hangs” or times out                            | Network? API key? Prompt <128k tokens?                        |
-| “flag expects VAR=VAL”                                  | Fix the syntax in `‑e` or `‑E`.                               |
-| Seeds file ignored after `--ai-seeds none`              | That is expected – inheritance was intentionally disabled.    |
-| Headers appear twice                                    | Use templates **or** rely on global de‑duplication, not both. |
-
----
-
-## 16 · Recipes
+## 11 · Recipes
 
 <details>
-<summary><strong>16.1 Diff‑friendly dump for code‑review</strong></summary>
+<summary><strong>11.1 Diff‑friendly dump for code‑review</strong></summary>
 
 ```bash
 # main branch
-ghconcat -g odoo -C -i -a addons/sale -o /tmp/base.txt
+ghconcat -s .py -C -i -a src -o /tmp/base.txt
 
-# feature branch (checkout first)
-ghconcat -g odoo -C -i -a addons/sale -o /tmp/head.txt
+# feature branch (after checkout)
+ghconcat -s .py -C -i -a src -o /tmp/head.txt
 
 diff -u /tmp/base.txt /tmp/head.txt | less -R
 ```
@@ -329,97 +262,110 @@ diff -u /tmp/base.txt /tmp/head.txt | less -R
 </details>
 
 <details>
-<summary><strong>16.2 Absolute‑path audit in server‑side CI</strong></summary>
+<summary><strong>11.2 Produce a “source‑of‑truth” Markdown</strong></summary>
 
 ```bash
-ghconcat -g py -g xml -C -i -a src -p -u text -o build/audit.txt
-```
-
-Convert `audit.txt` to HTML with anchors pointing to your repository browser.
-
-</details>
-
-<details>
-<summary><strong>16.3 Pre‑commit hook: lint, concatenate staged files, open in pager</strong></summary>
-
-```bash
-#!/usr/bin/env bash
-changed=$(git diff --cached --name-only --relative | tr '\n' ' ')
-[ -z "$changed" ] && exit 0
-
-ruff $changed && mypy --strict $changed || exit 1
-
-ghconcat -g py -C -i -a $changed -o /tmp/pre_commit_dump.txt
-less /tmp/pre_commit_dump.txt
+ghconcat -s .js -s .dart -C -i -a lib -a web \
+         -u markdown -h -R \
+         -o docs/source_of_truth.md
 ```
 
 </details>
 
 <details>
-<summary><strong>16.4 One‑liner to produce a “source‑of‑truth” Markdown file</strong></summary>
+<summary><strong>11.3 Context pipeline with AI post‑processing</strong></summary>
 
-```bash
-ghconcat -g dart -g js -C -i -a lib -a web -u js -o docs/source_of_truth.md
+```gctx
+[concat]
+-w .
+-a src
+-s .py -C -i
+-o concat.out.md
+
+[humanize]
+-a workspace/concat.out.md
+-t tpl/humanize.md
+--ia
+-o human.out.md
+
+[qa]
+-W qa_workspace
+-a workspace/human.out.md
+-t tpl/qa_check.md
+--ia
+-o report.md
 ```
 
-</details>
-
-<details>
-<summary><strong>16.5 Generate an OpenAPI spec summary with seeded context</strong></summary>
-
 ```bash
-ghconcat -g yml -g yaml -C -a api \
-         -t ai/openapi.tpl \
-         --ai --ai-seeds ai/seeds.jsonl \
-         -o ai/openapi_overview.md
-```
-
-</details>
-
-<details>
-<summary><strong>16.6 Aggregate back‑end, front‑end and assets in one artefact</strong></summary>
-
-```bash
-ghconcat -X ci_backend.gcx \
-         -X ci_frontend.gcx \
-         -X ci_assets.gcx \
-         -o build/ci_bundle.txt
+ghconcat -x pipeline.gctx
 ```
 
 </details>
 
 ---
 
-## 17 · Security & Privacy Notes
+## 12 · Migrating from v1
 
-* `ghconcat` never transmits your source code unless `--ai` is enabled.
-* When using `--ai`, **every byte** of the rendered prompt is sent to OpenAI.
-  Evaluate your IP policy and regulatory constraints before enabling.
-* The OpenAI API key is read **only** from `OPENAI_API_KEY`; no local caching.
-* Use network‑level egress policies in CI if you need to block external calls.
-* The tool exits with a clear error if the prompt exceeds the model’s hard limit.
+| v1 Flag / Concept | Replacement in v2         |
+|-------------------|---------------------------|
+| `‑g / ‑G`         | `‑s / ‑S` + plain suffix  |
+| `‑X`              | `‑x` + contexts `[ctx]`   |
+| `‑M` (first line) | `‑m` (keep) / `‑M` (drop) |
+| `‑P`              | `‑H` (suppress headers)   |
+| `‑p`              | `‑R` (absolute) / `‑r`    |
+| `‑u none`         | `‑U`                      |
 
----
+Quick example:
 
-## 18 · Performance Tips
+```bash
+# v1 style
+ghconcat -g py -C -i -n 80 -a src -X bundle.gcx
 
-* Combine `‑c` and `‑i` to reduce prompt size by \~35 % on Python‑heavy repos.
-* Prefer presets (`-g odoo`) over many individual extensions; the internal set is cached.
-* Running inside a container? Mount the workspace (`‑W`) on a tmpfs for faster I/O.
-* When using `‑X` contexts, group files logically to maximise header de‑duplication.
-
----
-
-## 19 · Contribution Guide
-
-1. **Style**`ruff` + `mypy --strict` + black defaults.
-2. **Tests**`pytest -q` or `python -m unittest -v`.
-3. **Commits**`<scope>: <subject>` (imperative, no trailing period).
-4. **Sign‑off**`git config --global user.signingkey …`.
-5. **PRs** welcome! Please open an issue before large rewrites.
+# v2 style
+ghconcat -s .py -C -i -n 80 -a src -x bundle.gcx
+```
 
 ---
 
-## 20 · License
+## 13 · Troubleshooting
 
-**MIT** – see `LICENSE` for the full text.
+| Symptom                         | Hint                                                          |
+|---------------------------------|---------------------------------------------------------------|
+| Empty dump                      | Check `‑a` / `‑s`; verify exclusions `‑A/‑S`.                 |
+| ChatGPT timeout                 | Network? quota? Prompt >128k tokens?                          |
+| Unresolved template var `{foo}` | Define with `‑e foo=bar` or expose a context alias.           |
+| Duplicate headers               | Avoid mixing `‑h` inside contexts with a root‑level template. |
+| `flag expects VAR=VAL`          | Fix the syntax in `‑e` or `‑E`.                               |
+| Imports/exports still present   | Use `‑i` and/or `‑I` as appropriate for the language.         |
+
+---
+
+## 14 · Environment & Exit Codes
+
+| Variable                | Purpose                                       |
+|-------------------------|-----------------------------------------------|
+| `OPENAI_API_KEY`        | Enables `--ai`.                               |
+| `GHCONCAT_DISABLE_AI=1` | Forces the local AI stub (unit tests).        |
+| `DEBUG=1`               | Shows Python tracebacks on unexpected errors. |
+
+| Code | Meaning                          |
+|------|----------------------------------|
+| 0    | Success                          |
+| 1    | Fatal error / validation failure |
+| 130  | Interrupted via Ctrl‑C           |
+
+---
+
+## 15 · Contribution Guide
+
+* **Style**: `ruff` + `mypy --strict` + the default *black* profile.
+* **Tests**: `python -m unittest -v` (or `pytest -q` if you prefer).
+* Commit messages: `feat: add wrap‑U flag` (imperative, no trailing period).
+* Please open an issue before large refactors – PRs are welcome!
+
+---
+
+## 16 · License
+
+MIT © GAHEOS S.A.
+
