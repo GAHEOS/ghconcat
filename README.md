@@ -328,6 +328,18 @@ ghconcat -x pipeline.gcx
 
 </details>
 
+<details>
+<summary><strong>11.4 Remote + local bundle for review</strong></summary>
+
+
+```bash
+ghconcat -a src -s .py \
+         -F https://gaheos.com/docs -d 1 -s .html \
+         -h -R \
+         -o docs/review_bundle.txt
+```
+
+</details>
 ---
 
 ## 12 · Remote URL Ingestion & Scraping
