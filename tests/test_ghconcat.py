@@ -501,6 +501,7 @@ class AIInheritanceTests(Base):
             _run(["-x", "ai_parent.gctx"])
         self.assertEqual(calls, 1, "Se esperaba una única llamada IA")
 
+
 # --------------------------------------------------------------------------- #
 #  20. -L overrides -l                                                        #
 # --------------------------------------------------------------------------- #
@@ -519,7 +520,7 @@ class ListOverrideTests(GhConcatBaseTest):
     def test_L_cancels_l(self) -> None:
         """When both flags are present, -L wins and the file is concatenated."""
         dump = _run(["-l", "-L", "-s", ".py", "-a", "src/module/alpha.py"])
-        self.assertInDump("def alpha", dump)          # file body present
+        self.assertInDump("def alpha", dump)  # file body present
         self.assertNotEqual(
             dump.strip(),
             "src/module/alpha.py",
@@ -531,6 +532,7 @@ class ListOverrideTests(GhConcatBaseTest):
         dump = _run(["-L", "-s", ".py", "-a", "src/module/alpha.py"])
         self.assertInDump("def alpha", dump)
         self.assertNotInDump("\nsrc/module/alpha.py\n", dump)  # no bare listing
+
 
 # --------------------------------------------------------------------------- #
 # 21. Environment-variable resolution & propagation                           #
@@ -579,6 +581,56 @@ class EnvPropagationTests(GhConcatBaseTest):
         dump = _run(["-x", str(d)])
         # Child did NOT inherit, so no alpha.py path makes it through
         self.assertNotInDump("alpha.py", dump)
+
+
+# --------------------------------------------------------------------------- #
+# 22. Remote URL fetching with -f/--url                                      #
+# --------------------------------------------------------------------------- #
+
+class RemoteURLTests(GhConcatBaseTest):
+    """Validate the new -f/--url flag against a real HTML endpoint."""
+
+    def test_fetch_url_contains_html(self) -> None:
+        """
+        Fetch https://www.gaheos.com with -f and confirm the dump includes the
+        opening <html tag (case-insensitive).  Uses suffix filter to limit to
+        .html content.
+        """
+        dump = _run(["-f", "https://www.gaheos.com", "-s", ".html"])
+        self.assertInDump("<html", dump.lower())
+
+
+class ScrapeURLTests(GhConcatBaseTest):
+    """Validate the -F/--url-scrape recursive crawler."""
+
+    def test_html_scrape_recurses_and_keeps_html(self) -> None:
+        """
+        Crawl https://www.gaheos.com, restrict to .html, and ensure that:
+        • The dump includes an <html tag (case-insensitive) from the root page.
+        • More than one header banner appears, meaning at least two HTML
+          resources were fetched (root + at least one linked page).
+        """
+        dump = _run(["-F", "https://www.gaheos.com", "-s", ".html", "-h", "-d", "1"])
+        self.assertInDump("<html", dump.lower())
+        self.assertGreaterEqual(dump.count(HEADER_DELIM), 2,
+                                "expected multiple HTML documents in scrape")
+
+    def test_depth_zero_fetches_only_seed(self) -> None:
+        """
+        Depth 0 ⇒ solo la página raíz. Se valida contando headers.
+        Suponemos que https://www.gaheos.com enlaza al menos a otra página
+        interna (.html); con depth 0 no debe aparecer.
+        """
+        dump = _run([
+            "-F", "https://www.gaheos.com",
+            "-s", ".html",
+            "-h",
+            "-d", "0",  # profundidad cero
+        ])
+        # Solo un encabezado esperado
+        self.assertEqual(dump.count(HEADER_DELIM), 2,
+                         "depth 0 should include only the seed URL")
+
 
 # --------------------------------------------------------------------------- #
 #  Utility for writing small template files                                   #

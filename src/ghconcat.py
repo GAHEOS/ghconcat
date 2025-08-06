@@ -24,23 +24,30 @@ _LINE1_RE: re.Pattern[str] = re.compile(r"^\s*#\s*line\s*1\d*\s*$")
 # This cache is *per GhConcat.run()*; it is cleared on each public entry call.
 _SEEN_FILES: set[str] = set()
 
-_COMMENT_RULES: dict[str, Tuple[
+_COMMENT_RULES: Dict[str, Tuple[
     re.Pattern[str],  # simple comment
     re.Pattern[str],  # full‑line comment
     Optional[re.Pattern[str]],  # import‑like
     Optional[re.Pattern[str]],  # export‑like
 ]] = {
+    # ─────────────  Scripting / dynamic  ─────────────
     ".py": (
         re.compile(r"^\s*#(?!#).*$"),
         re.compile(r"^\s*#.*$"),
         re.compile(r"^\s*(?:import\b|from\b.+?\bimport\b)"),
         None,
     ),
-    ".dart": (
-        re.compile(r"^\s*//(?!/).*$"),
-        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
-        re.compile(r"^\s*import\b"),
-        re.compile(r"^\s*export\b"),
+    ".rb": (
+        re.compile(r"^\s*#(?!#).*$"),
+        re.compile(r"^\s*#.*$"),
+        re.compile(r"^\s*require\b"),
+        None,
+    ),
+    ".php": (
+        re.compile(r"^\s*(?://|#)(?!/).*$"),
+        re.compile(r"^\s*(?://|#).*$"),
+        re.compile(r"^\s*(?:require|include|use)\b"),
+        None,
     ),
     ".js": (
         re.compile(r"^\s*//(?!/).*$"),
@@ -48,12 +55,136 @@ _COMMENT_RULES: dict[str, Tuple[
         re.compile(r"^\s*import\b"),
         re.compile(r"^\s*(?:export\b|module\.exports\b)"),
     ),
+    ".jsx": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*import\b"),
+        re.compile(r"^\s*export\b"),
+    ),
+    ".ts": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*import\b"),
+        re.compile(r"^\s*export\b"),
+    ),
+    ".tsx": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*import\b"),
+        re.compile(r"^\s*export\b"),
+    ),
+    ".dart": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*import\b"),
+        re.compile(r"^\s*export\b"),
+    ),
+    ".sh": (
+        re.compile(r"^\s*#(?!#).*$"),
+        re.compile(r"^\s*#.*$"),
+        re.compile(r"^\s*(?:source|\. )"),
+        None,
+    ),
+    ".bash": (
+        re.compile(r"^\s*#(?!#).*$"),
+        re.compile(r"^\s*#.*$"),
+        re.compile(r"^\s*(?:source|\. )"),
+        None,
+    ),
+    ".ps1": (
+        re.compile(r"^\s*#(?!#).*$"),
+        re.compile(r"^\s*#.*$"),
+        re.compile(r"^\s*Import-Module\b"),
+        None,
+    ),
+
+    # ─────────────  Static & systems  ─────────────
+    ".c": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*#\s*include\b"),
+        None,
+    ),
+    ".cpp": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*#\s*include\b"),
+        None,
+    ),
+    ".cc": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*#\s*include\b"),
+        None,
+    ),
+    ".cxx": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*#\s*include\b"),
+        None,
+    ),
+    ".h": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*#\s*include\b"),
+        None,
+    ),
+    ".hpp": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*#\s*include\b"),
+        None,
+    ),
     ".go": (
         re.compile(r"^\s*//(?!/).*$"),
         re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
-        None,
+        re.compile(r"^\s*import\b"),
         None,
     ),
+    ".rs": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*use\b"),
+        None,
+    ),
+    ".java": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*import\b"),
+        None,
+    ),
+    ".cs": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*using\b"),
+        None,
+    ),
+    ".swift": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*import\b"),
+        None,
+    ),
+    ".kt": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*import\b"),
+        None,
+    ),
+    ".kts": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*import\b"),
+        None,
+    ),
+    ".scala": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        re.compile(r"^\s*import\b"),
+        None,
+    ),
+
+    # ─────────────  Data / markup  ─────────────
     ".yml": (
         re.compile(r"^\s*#(?!#).*$"),
         re.compile(r"^\s*#.*$"),
@@ -64,6 +195,62 @@ _COMMENT_RULES: dict[str, Tuple[
         re.compile(r"^\s*#(?!#).*$"),
         re.compile(r"^\s*#.*$"),
         None,
+        None,
+    ),
+    ".sql": (
+        re.compile(r"^\s*--(?!-).*$"),
+        re.compile(r"^\s*--.*$"),
+        None,
+        None,
+    ),
+    ".html": (
+        re.compile(r"^\s*<!--(?!-).*-->.*$"),
+        re.compile(r"^\s*<!--.*-->.*$"),
+        None,
+        None,
+    ),
+    ".xml": (
+        re.compile(r"^\s*<!--(?!-).*-->.*$"),
+        re.compile(r"^\s*<!--.*-->.*$"),
+        None,
+        None,
+    ),
+    ".css": (
+        re.compile(r"^\s*/\*(?!\*).*\*/\s*$"),
+        re.compile(r"^\s*/\*.*\*/\s*$"),
+        None,
+        None,
+    ),
+    ".scss": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        None,
+        None,
+    ),
+
+    # ─────────────  Miscellaneous / scientific  ─────────────
+    ".r": (
+        re.compile(r"^\s*#(?!#).*$"),
+        re.compile(r"^\s*#.*$"),
+        re.compile(r"^\s*library\("),
+        None,
+    ),
+    ".lua": (
+        re.compile(r"^\s*--(?!-).*$"),
+        re.compile(r"^\s*--.*$"),
+        re.compile(r"^\s*require\b"),
+        None,
+    ),
+    ".pl": (
+        re.compile(r"^\s*#(?!#).*$"),
+        re.compile(r"^\s*#.*$"),
+        re.compile(r"^\s*use\b"),
+        None,
+    ),
+    ".pm": (
+        re.compile(r"^\s*#(?!#).*$"),
+        re.compile(r"^\s*#.*$"),
+        re.compile(r"^\s*use\b"),
         None,
     ),
 }
@@ -175,7 +362,11 @@ def _parse_directive_file(path: Path) -> DirNode:
 _VALUE_FLAGS: Set[str] = {
     "-w", "--workdir", "-W", "--workspace",
     "-a", "--add-path", "-A", "--exclude-path",
-    "-s", "--suffix", "-S", "--exclude-suffix",
+    "-f", "--url",
+    "-F", "--url-scrape",
+    "-d", "--url-scrape-depth",
+    "-D", "--disable-same-domain"
+          "-s", "--suffix", "-S", "--exclude-suffix",
     "-n", "--total-lines", "-N", "--start-line",
     "-t", "--template", "-o", "--output",
     "-u", "--wrap", "--ai-model", "--ai-system-prompt",
@@ -183,6 +374,32 @@ _VALUE_FLAGS: Set[str] = {
     "--ai-presence-penalty", "--ai-frequency-penalty",
     "-e", "--env", "-E", "--global-env",
 }
+
+_INT_ATTRS: Set[str] = {
+    "total_lines", "first_line",
+    "url_scrape_depth",
+}
+_LIST_ATTRS: Set[str] = {
+    "add_path", "exclude_path", "suffix", "exclude_suf",
+    "hdr_flags", "path_flags", "blank_flags", "first_flags",
+    "urls", "url_scrape",
+}
+_BOOL_ATTRS: Set[str] = {
+    "rm_simple", "rm_all", "rm_import", "rm_export",
+    "keep_blank", "list_only", "absolute_path", "skip_headers",
+    "keep_header", "disable_url_domain_only"
+}
+_STR_ATTRS: Set[str] = {
+    "workdir", "workspace", "template", "wrap_lang",
+    "ai_model", "ai_system_prompt", "ai_seeds",
+}
+_FLT_ATTRS: Set[str] = {
+    "ai_temperature",
+    "ai_top_p",
+    "ai_presence_penalty",
+    "ai_frequency_penalty",
+}
+_NON_INHERITED: Set[str] = {"output", "unwrap", "ai"}
 
 
 def _strip_none(tokens: List[str]) -> List[str]:
@@ -338,6 +555,40 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Exclude an entire directory tree from discovery, even if it was "
             "added by a broader −a.  Multiple use is allowed."
+        ),
+    )
+    g_loc.add_argument(
+        "-f", "--url", metavar="URL", action="append", dest="urls",
+        help=(
+            "Fetch a remote URL and include its content as if it were a local "
+            "file.  Subject to the same filters and slicing rules applied to -a."
+        ),
+    )
+    g_loc.add_argument(
+        "-F", "--url-scrape", metavar="URL", action="append", dest="url_scrape",
+        help=(
+            "Recursively crawl URL(s), download every linked resource that passes "
+            "the current suffix / exclusion filters, and include them as if they "
+            "were local files. Links without an extension are treated as .html."
+        ),
+    )
+    g_loc.add_argument(
+        "-d", "--url-scrape-depth", metavar="N", type=int,
+        dest="url_scrape_depth", default=1,
+        help=(
+            "Maximum recursion depth for -F/--url-scrape (default: 2). "
+            "Depth 0 processes only the seed URL(s) without following links."
+        ),
+    )
+    g_loc.add_argument(
+        "-D", "--disable-same-domain",
+        action="store_true",
+        dest="disable_url_domain_only",
+        help=(
+            "Disable the same-domain restriction when crawling with −F. "
+            "When this flag is present, links pointing to *any* external "
+            "scheme+host are followed.  Without −D, scraping is confined to "
+            "the seed URL’s scheme and host."
         ),
     )
     g_loc.add_argument(
@@ -862,28 +1113,136 @@ def _call_openai(  # pragma: no cover
         out_path.write_text(f"⚠ OpenAI error: {exc}", encoding="utf-8")
 
 
-# ─────────────────────────────  Merge helpers  ──────────────────────────────
-_LIST_ATTRS: Set[str] = {
-    "add_path", "exclude_path", "suffix", "exclude_suf",
-    "hdr_flags", "path_flags", "blank_flags", "first_flags",
-}
-_BOOL_ATTRS: Set[str] = {
-    "rm_simple", "rm_all", "rm_import", "rm_export",
-    "keep_blank", "list_only", "absolute_path", "skip_headers",
-    "keep_header",
-}
-_INT_ATTRS: Set[str] = {"total_lines", "first_line"}
-_STR_ATTRS: Set[str] = {
-    "workdir", "workspace", "template", "wrap_lang",
-    "ai_model", "ai_system_prompt", "ai_seeds",
-}
-_FLT_ATTRS: Set[str] = {
-    "ai_temperature",
-    "ai_top_p",
-    "ai_presence_penalty",
-    "ai_frequency_penalty",
-}
-_NON_INHERITED: Set[str] = {"output", "unwrap", "ai"}
+def _fetch_urls(urls: List[str], cache_root: Path) -> List[Path]:
+    """
+    Download every *URL* into a temporary cache directory under *cache_root*
+    and return a list of `Path` objects pointing to the downloaded files.
+
+    • Preserves the original filename when present; otherwise uses
+      “remote_<idx>[.ext]”, where *.ext* is inferred from Content-Type if
+      available (e.g. text/html → .html, application/json → .json).
+    • Emits one log line per successful fetch:  «✔ fetched URL → /path/file».
+    • A minimal User-Agent header avoids 403 responses on stricter servers.
+    • On any failure the URL is skipped and a warning is printed.
+    """
+    import urllib.request, urllib.parse, mimetypes, sys
+
+    cache_dir = cache_root / ".ghconcat_urlcache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    _MIME_EXT_FALLBACK = {
+        "text/html": ".html", "application/json": ".json",
+        "text/css": ".css", "text/plain": ".txt", "text/xml": ".xml",
+    }
+
+    downloaded: List[Path] = []
+    for idx, link in enumerate(urls):
+        try:
+            req = urllib.request.Request(
+                link, headers={"User-Agent": "ghconcat/2.0 (+https://gaheos.com)"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+                ctype = resp.headers.get("Content-Type", "").split(";", 1)[0].strip()
+
+            raw_name = Path(urllib.parse.urlparse(link).path).name or f"remote_{idx}"
+            if "." not in raw_name:
+                raw_name += _MIME_EXT_FALLBACK.get(ctype) or mimetypes.guess_extension(ctype) or ".html"
+
+            dst = cache_dir / f"{idx}_{raw_name}"
+            dst.write_bytes(data)
+            downloaded.append(dst)
+            print(f"✔ fetched {link} → {dst}", file=sys.stderr)
+
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠  could not fetch {link}: {exc}", file=sys.stderr)
+
+    return downloaded
+
+
+def _scrape_urls(
+        seeds: List[str],
+        cache_root: Path,
+        *,
+        suffixes: List[str],
+        exclude_suf: List[str],
+        max_depth: int = 2,
+        same_host_only: bool = True,
+) -> List[Path]:
+    """
+    Recursively crawl *seeds* (depth-limited) and download linked resources
+    that satisfy suffix / exclusion rules.  Returns cached Path objects.
+
+    • Logs every successful download: «✔ scraped URL (d=depth) → /path/file».
+    • Links without extension are treated as .html for filtering.
+    • scheme+netloc must match the origin when *same_host_only* is True.
+    """
+    import urllib.request, urllib.parse, mimetypes, html, re, sys
+    from collections import deque
+
+    _EXT_FALLBACK = {
+        "text/html": ".html", "application/json": ".json",
+        "text/css": ".css", "text/plain": ".txt", "text/xml": ".xml",
+    }
+    cache_dir = cache_root / ".ghconcat_urlcache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    href_re = re.compile(r'href=["\']?([^"\' >]+)', re.I)
+    ua_hdr = {"User-Agent": "ghconcat/2.0 (+https://gaheos.com)"}
+
+    visited: set[str] = set()
+    queue = deque([(u, 0) for u in seeds])
+    out_paths: List[Path] = []
+
+    def _download(url: str, idx: int, depth: int) -> Optional[Tuple[Path, str, bytes]]:
+        try:
+            req = urllib.request.Request(url, headers=ua_hdr)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+                ctype = resp.headers.get("Content-Type", "").split(";", 1)[0].strip()
+            name = Path(urllib.parse.urlparse(url).path).name or f"remote_{idx}"
+            if "." not in name:
+                name += _EXT_FALLBACK.get(ctype) or mimetypes.guess_extension(ctype) or ".html"
+            dst = cache_dir / f"scr_{idx}_{name}"
+            dst.write_bytes(data)
+            print(f"✔ scraped {url} (d={depth}) → {dst}", file=sys.stderr)
+            return dst, ctype, data
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠  could not scrape {url}: {exc}", file=sys.stderr)
+            return None
+
+    while queue:
+        url, depth = queue.popleft()
+        if url in visited or depth > max_depth:
+            continue
+        visited.add(url)
+
+        dl = _download(url, len(visited), depth)
+        if dl is None:
+            continue
+        dst, ctype, body = dl
+
+        ext = dst.suffix.lower() or ".html"
+        if suffixes and not any(ext.endswith(s) for s in suffixes):
+            continue
+        if any(ext.endswith(s) for s in set(exclude_suf) - set(suffixes)):
+            continue
+        out_paths.append(dst)
+
+        if ctype.startswith("text/html") and depth < max_depth:
+            try:
+                txt = body.decode("utf-8", "ignore")
+                for link in href_re.findall(txt):
+                    abs_url = urllib.parse.urljoin(url, html.unescape(link))
+                    if same_host_only:
+                        if urllib.parse.urlparse(abs_url)[:2] != urllib.parse.urlparse(url)[:2]:
+                            continue
+                    if abs_url not in visited:
+                        queue.append((abs_url, depth + 1))
+            except Exception:
+                pass
+
+    return out_paths
 
 
 def _merge_ns(parent: argparse.Namespace, child: argparse.Namespace) -> argparse.Namespace:
@@ -936,33 +1295,25 @@ def _execute_node(
 ) -> Tuple[Dict[str, str], str]:
     """
     Recursive executor.  Returns *(vars, final_output)* for *node*.
-
-    Key change (2025-08-06)
-    -----------------------
-    * «-e» (local env) **is no longer propagated** to child contexts – only
-      «-E» definitions travel downwards.  Nevertheless, both kinds of
-      variables can already be referenced **inside the same context block**
-      (e.g. `-e root='.'  -w $root`).
     """
+    # ── 0. Herencia inicial de variables ───────────────────────────────────
     inherited_vars = inherited_vars or {}
-
-    # 0️⃣ First expansion pass so we can *parse* the flags
     tokens = _expand_tokens(node.tokens, inherited_env=inherited_vars)
 
     ns_self = _build_parser().parse_args(tokens)
     _post_parse(ns_self)
 
-    # 1️⃣ Effective namespace after inheritance
+    # Namespace efectivo tras heredar del padre
     ns_effective = _merge_ns(ns_parent, ns_self) if ns_parent else ns_self
 
-    # 2️⃣ Workspace & workdir resolution
+    # ── 1. Init de raíz ────────────────────────────────────────────────────
     if level == 0:
         gh_dump = []
-        _SEEN_FILES.clear()                       # header de-dup
+        _SEEN_FILES.clear()
 
+    # ── 2. Resolución de workdir / workspace ───────────────────────────────
     root_base = parent_root or Path.cwd()
     root = _resolve_path(root_base, ns_effective.workdir or ".")
-
     workspace = (
         _resolve_path(parent_workspace or root, ns_effective.workspace)
         if ns_effective.workspace else root
@@ -972,41 +1323,77 @@ def _execute_node(
     if not workspace.exists():
         _fatal(f"--workspace {workspace} not found")
 
-    # 3️⃣ Environment-variable scopes
-    global_env_map = _parse_env_items(ns_effective.global_env)      # -E
-    local_env_map  = _parse_env_items(ns_effective.env_vars)        # -e
+    # ── 3. Ámbitos de variables ────────────────────────────────────────────
+    global_env_map = _parse_env_items(ns_effective.global_env)
+    local_env_map = _parse_env_items(ns_effective.env_vars)
 
-    inherited_for_children: Dict[str, str] = {
-        **inherited_vars,        # from parent
-        **global_env_map,        # propagate downwards
-    }
-    vars_local: Dict[str, str] = {
-        **inherited_for_children,
-        **local_env_map,         # visible only in *this* context
-    }
+    inherited_for_children = {**inherited_vars, **global_env_map}
+    vars_local = {**inherited_for_children, **local_env_map}
     ctx_name = node.name
 
-    # 4️⃣ Raw concatenation phase ------------------------------------------------
+    # ── 4. Concatenación bruta (local + remoto) ────────────────────────────
     dump_raw = ""
-    if ns_effective.add_path:
-        files = _gather_files(
-            add_path=[
-                Path(p) if Path(p).is_absolute() else (root / p).resolve()
-                for p in ns_effective.add_path
-            ],
-            exclude_dirs=[
-                Path(p) if Path(p).is_absolute() else (root / p).resolve()
-                for p in ns_effective.exclude_path or []
-            ],
-            suffixes=_split_list(ns_effective.suffix),
-            exclude_suf=_split_list(ns_effective.exclude_suf),
-        )
+    if ns_effective.add_path or ns_effective.urls or ns_effective.url_scrape:
+        suffixes = _split_list(ns_effective.suffix)
+        exclude_suf = _split_list(ns_effective.exclude_suf)
 
+        # 4.1 Sistema de ficheros local
+        local_files: List[Path] = []
+        if ns_effective.add_path:
+            local_files = _gather_files(
+                add_path=[
+                    Path(p) if Path(p).is_absolute() else (root / p).resolve()
+                    for p in ns_effective.add_path
+                ],
+                exclude_dirs=[
+                    Path(p) if Path(p).is_absolute() else (root / p).resolve()
+                    for p in ns_effective.exclude_path or []
+                ],
+                suffixes=suffixes,
+                exclude_suf=exclude_suf,
+            )
+
+        # 4.2 Descarga puntual (-f/--url)
+        remote_files: List[Path] = []
+        if ns_effective.urls:
+            remote_files = _fetch_urls(ns_effective.urls, workspace)
+
+        # 4.3 Scraping recursivo (-F/--url-scrape)
+        scraped_files: List[Path] = []
+        if ns_effective.url_scrape:
+            max_depth = (
+                2 if ns_effective.url_scrape_depth is None
+                else ns_effective.url_scrape_depth      # permite 0
+            )
+            scraped_files = _scrape_urls(
+                ns_effective.url_scrape,
+                workspace,
+                suffixes=suffixes,
+                exclude_suf=exclude_suf,
+                max_depth=max_depth,
+                same_host_only=not ns_effective.disable_url_domain_only,
+            )
+
+        # 4.4 Unión + filtro post-descarga
+        files = [
+            *local_files,
+            *[
+                fp for fp in (*remote_files, *scraped_files)
+                if (
+                    (not suffixes or any(fp.name.endswith(s) for s in suffixes))
+                    and not any(fp.name.endswith(s)
+                                for s in set(exclude_suf) - set(suffixes))
+                )
+            ],
+        ]
+
+        # 4.5 Concatenación + wrapping opcional
         if files:
             wrapped: Optional[List[Tuple[str, str]]] = [] if ns_effective.wrap_lang else None
-            dump_raw = _concat_files(files, ns_effective, header_root=root, wrapped=wrapped)
+            dump_raw = _concat_files(
+                files, ns_effective, header_root=root, wrapped=wrapped,
+            )
 
-            # optional fenced wrapping
             if ns_effective.wrap_lang and wrapped:
                 fenced: List[str] = []
                 for hp, body in wrapped:
@@ -1017,16 +1404,16 @@ def _execute_node(
                     )
                 dump_raw = "".join(fenced)
 
-    # 4.1 Expose raw values in variable space
+    # ── 5. Expose raw al espacio de variables ──────────────────────────────
     if ctx_name:
         vars_local[f"_r_{ctx_name}"] = dump_raw
         vars_local[ctx_name] = dump_raw
     if gh_dump is not None:
         gh_dump.append(dump_raw)
 
-    _refresh_env_values(vars_local)     # after raw concat
+    _refresh_env_values(vars_local)
 
-    # 5️⃣ Child contexts ---------------------------------------------------------
+    # ── 6. Procesar hijos recursivamente ───────────────────────────────────
     for child in node.children:
         child_vars, _ = _execute_node(
             child,
@@ -1034,22 +1421,21 @@ def _execute_node(
             level=level + 1,
             parent_root=root,
             parent_workspace=workspace,
-            inherited_vars=inherited_for_children,   # ⬅️  no local «-e» leakage
+            inherited_vars=inherited_for_children,
             gh_dump=gh_dump,
         )
         vars_local.update(child_vars)
 
-    _refresh_env_values(vars_local)     # after children
+    _refresh_env_values(vars_local)
 
-    # 6️⃣ Template interpolation -------------------------------------------------
+    # ── 7. Templating -------------------------------------------------------
     rendered = dump_raw
     if ns_effective.template:
         tpl_path = _resolve_path(workspace, ns_effective.template)
         if not tpl_path.exists():
             _fatal(f"template {tpl_path} not found")
-        tpl_text = tpl_path.read_text(encoding="utf-8")
         rendered = _interpolate(
-            tpl_text,
+            tpl_path.read_text(encoding="utf-8"),
             {**vars_local, "ghconcat_dump": "".join(gh_dump or [])},
         )
 
@@ -1057,29 +1443,38 @@ def _execute_node(
         vars_local[f"_t_{ctx_name}"] = rendered
         vars_local[ctx_name] = rendered
 
-    _refresh_env_values(vars_local)     # after template
+    _refresh_env_values(vars_local)
 
-    # 7️⃣ AI phase (unchanged) ----------------------------------------------------
+    # ── 8. Gateway AI (OpenAI) ---------------------------------------------
     final_out = rendered
     out_path: Optional[Path] = None
     if ns_effective.output and ns_effective.output.lower() != TOK_NONE:
         out_path = _resolve_path(workspace, ns_effective.output)
 
     if ns_effective.ai:
+        # Si no hay -o, crear tmpfile
         if out_path is None:
-            tf = tempfile.NamedTemporaryFile(delete=False, dir=workspace, suffix=".ai.txt")
+            tf = tempfile.NamedTemporaryFile(
+                delete=False, dir=workspace, suffix=".ai.txt"
+            )
             tf.close()
             out_path = Path(tf.name)
 
+        # System-prompt
         sys_prompt = ""
-        if ns_effective.ai_system_prompt and ns_effective.ai_system_prompt.lower() != TOK_NONE:
+        if (ns_effective.ai_system_prompt
+                and ns_effective.ai_system_prompt.lower() != TOK_NONE):
             spath = _resolve_path(workspace, ns_effective.ai_system_prompt)
             if not spath.exists():
                 _fatal(f"system prompt {spath} not found")
-            sys_prompt = _interpolate(spath.read_text(encoding="utf-8"), vars_local)
+            sys_prompt = _interpolate(
+                spath.read_text(encoding="utf-8"), vars_local
+            )
 
+        # Seeds
         seeds = None
-        if ns_effective.ai_seeds and ns_effective.ai_seeds.lower() != TOK_NONE:
+        if (ns_effective.ai_seeds
+                and ns_effective.ai_seeds.lower() != TOK_NONE):
             seeds = _resolve_path(workspace, ns_effective.ai_seeds)
 
         (_call_openai if "ghconcat" not in sys.modules else
@@ -1100,15 +1495,15 @@ def _execute_node(
         vars_local[f"_ia_{ctx_name}"] = final_out
         vars_local[ctx_name] = final_out
 
-    _refresh_env_values(vars_local)     # after AI
+    _refresh_env_values(vars_local)
 
-    # 8️⃣ Output-file write (unchanged) ------------------------------------------
+    # ── 9. Escritura a disco (si -o y sin AI) ------------------------------
     if out_path and not ns_effective.ai:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(final_out, encoding="utf-8")
         print(f"✔ Output written → {out_path}")
 
-    # Synthetic root-level dump
+    # ── 10. Dump sintético raíz cuando procede -----------------------------
     if level == 0 and final_out == "" and gh_dump:
         final_out = "".join(gh_dump)
     if level == 0 and gh_dump is not None:
