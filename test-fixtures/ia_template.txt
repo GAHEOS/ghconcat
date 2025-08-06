@@ -1,4 +1,0 @@
-### CONTEXT
-{ghconcat_dump}
-
-### Summarise

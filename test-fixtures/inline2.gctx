@@ -1,3 +1,0 @@
-[xml]
--h -s .xml -a src/module/omega.xml
--n 2

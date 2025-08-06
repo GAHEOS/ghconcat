@@ -1,5 +1,0 @@
--b -s .py
-
-[keep]
--B
--a src/module/gamma.py
