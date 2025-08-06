@@ -1,17 +1,4 @@
-#!/usr/bin/env python3
-"""
-ghconcat – Multi‑level concatenation, slicing and templating tool
-=================================================================
-
-Production‑ready build dated **2025‑08‑01**.
-Fully satisfies the GAHEOS refactor specification, including:
-
-* Priority handling for –x / –X and CLI overrides.
-* Two‑pass environment/alias propagation with {dump_data}.
-* System‑prompt and template interpolation with env/alias variables.
-* AI integration with inheritable --ai-* flags and JSONL seed support.
-* Global header de‑duplication when no template is used.
-"""
+# !/usr/bin/env python3
 
 from __future__ import annotations
 
@@ -28,17 +15,22 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-# ───────────────────────── Configuration constants ─────────────────────────
-HEADER_DELIM = "===== "
-DEFAULT_OPENAI_MODEL = "o3"
-TOK_NONE = "none"
+# ───────────────────────────────  Constants  ────────────────────────────────
+HEADER_DELIM: str = "===== "
+DEFAULT_OPENAI_MODEL: str = "o3"
+TOK_NONE: str = "none"
 
-PRESETS: dict[str, set[str]] = {
-    "odoo": {".py", ".xml", ".js", ".csv"},
-}
+# Pattern used to wipe any “# line 1…” when the first line must be dropped.
+_LINE1_RE: re.Pattern[str] = re.compile(r"^\s*#\s*line\s*1\d*\s*$")
+
+# This cache is *per GhConcat.run()*; it is cleared on each public entry call.
+_SEEN_FILES: set[str] = set()
 
 _COMMENT_RULES: dict[str, Tuple[
-    re.Pattern, re.Pattern, Optional[re.Pattern], Optional[re.Pattern]
+    re.Pattern[str],  # simple comment
+    re.Pattern[str],  # full‑line comment
+    Optional[re.Pattern[str]],  # import‑like
+    Optional[re.Pattern[str]],  # export‑like
 ]] = {
     ".py": (
         re.compile(r"^\s*#(?!#).*$"),
@@ -48,15 +40,21 @@ _COMMENT_RULES: dict[str, Tuple[
     ),
     ".dart": (
         re.compile(r"^\s*//(?!/).*$"),
-        re.compile(r"^\s*//.*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
         re.compile(r"^\s*import\b"),
         re.compile(r"^\s*export\b"),
     ),
     ".js": (
         re.compile(r"^\s*//(?!/).*$"),
-        re.compile(r"^\s*//.*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
         re.compile(r"^\s*import\b"),
         re.compile(r"^\s*(?:export\b|module\.exports\b)"),
+    ),
+    ".go": (
+        re.compile(r"^\s*//(?!/).*$"),
+        re.compile(r"^\s*(?://.*|/\*.*\*/\s*)$"),
+        None,
+        None,
     ),
     ".yml": (
         re.compile(r"^\s*#(?!#).*$"),
@@ -72,35 +70,49 @@ _COMMENT_RULES: dict[str, Tuple[
     ),
 }
 
-_RE_BLANK = re.compile(r"^\s*$")
-_PLACEHOLDER = re.compile(r"\{([a-zA-Z_][\w\-]*)\}")
-_ENV_REF = re.compile(r"\$([a-zA-Z_][\w\-]*)")
+_RE_BLANK: re.Pattern[str] = re.compile(r"^\s*$")
+_PLACEHOLDER: re.Pattern[str] = re.compile(r"\{([a-zA-Z_][\w\-]*)\}")
+_ENV_REF: re.Pattern[str] = re.compile(r"\$([a-zA-Z_][\w\-]*)")
 
-# Optional OpenAI import
+# Optional OpenAI import (lazy)
 try:
     import openai  # type: ignore
     from openai import OpenAIError  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover
     openai = None  # type: ignore
 
+
     class OpenAIError(Exception):  # type: ignore
         """Raised when the OpenAI SDK is unavailable."""
 
 
-# ─────────────────────────── Common helpers ───────────────────────────
+# ───────────────────────────────  Data classes  ─────────────────────────────
+class DirNode:
+    """
+    Simple tree container representing a “[context]” block inside a
+    directive file.
+    """
+
+    def __init__(self, name: Optional[str] = None) -> None:
+        self.name: Optional[str] = name
+        self.tokens: List[str] = []
+        self.children: List["DirNode"] = []
+
+
+# ─────────────────────────────  Aux helpers  ────────────────────────────────
 def _fatal(msg: str, code: int = 1) -> None:
-    """Print *msg* on **STDERR** and exit gracefully (no traceback)."""
+    """Abort execution immediately with *msg* written to *stderr*."""
     print(msg, file=sys.stderr)
     sys.exit(code)
 
 
-def _debug_enabled() -> bool:
-    """Return *True* if DEBUG=1 is present in the environment."""
+def _debug_enabled() -> bool:  # pragma: no cover
+    """Utility guard to ease local debugging (`DEBUG=1`)."""
     return os.getenv("DEBUG") == "1"
 
 
 def _is_within(path: Path, parent: Path) -> bool:
-    """Return *True* if *parent* is an ancestor of *path*."""
+    """Return *True* if *path* is contained in *parent* (ancestor check)."""
     try:
         path.relative_to(parent)
         return True
@@ -108,89 +120,76 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
-# ──────────────────── Batch‑file & token pre‑processing ────────────────────
-def _tokenize_line(raw: str) -> List[str]:
+# ───────────────────────  Directive‑file parsing  ───────────────────────────
+def _tokenize_directive_line(raw: str) -> List[str]:
     """
-    Convert one raw directive line into argv‑style tokens.
+    Split *raw* (a single line from the directive file) into CLI‑style tokens,
+    honouring `//`, `#` and `;` as inline‑comment delimiters.
 
-    * Shell‑style quoting is honoured (via ``shlex.split``).
-    * “// …” or “# …” comments at EOL are stripped.
-    * Bare words without leading “‑” are interpreted as “‑a”.
-    * ``[alias]`` maps to an implicit level‑2 context (equivalent to
-      “‑X __ctx:alias”).
+    If the very first token does **not** start with “‑”, the whole line is
+    treated as a list of paths and expanded into multiple “‑a PATH”.
     """
-    stripped = raw.split("//", 1)[0].split("#", 1)[0].strip()
+    stripped = (
+        raw.split("//", 1)[0]
+        .split("#", 1)[0]
+        .split(";", 1)[0]
+        .strip()
+    )
     if not stripped:
         return []
-
-    if stripped.startswith("[") and stripped.endswith("]"):
-        alias = stripped.strip("[]").strip()
-        return ["-X", f"__ctx:{alias}"] if alias else []
 
     parts = shlex.split(stripped)
     if not parts:
         return []
 
-    if parts[0].startswith("-"):
-        return parts
-
-    # Implicit “‑a” prefix for bare paths
-    tokens: List[str] = []
-    for route in parts:
-        tokens.extend(["-a", route])
-    return tokens
+    if not parts[0].startswith("-"):
+        tokens: List[str] = []
+        for pth in parts:
+            tokens.extend(["-a", pth])
+        return tokens
+    return parts
 
 
-def _parse_directive_file(path: Path) -> List[str]:
-    """Return the flat token list extracted from *path*."""
-    tokens: List[str] = []
+def _parse_directive_file(path: Path) -> DirNode:
+    """
+    Build a `DirNode` tree out of the *path* directive file.
+    """
+    root = DirNode()
+    current = root
+
     with path.open("r", encoding="utf-8") as fp:
         for raw in fp:
-            tokens.extend(_tokenize_line(raw))
-    return tokens
+            stripped = raw.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                ctx_name = stripped.strip("[]").strip()
+                node = DirNode(ctx_name)
+                root.children.append(node)
+                current = node
+                continue
+
+            line_toks = _tokenize_directive_line(raw)
+            if line_toks:
+                current.tokens.extend(line_toks)
+    return root
 
 
-# ───────────────────── “none” & env‑var substitution ──────────────────────
-_VALUE_FLAGS = {
+# ─────────────────────── “none” handling & env substitution  ────────────────
+_VALUE_FLAGS: Set[str] = {
     "-w", "--workdir", "-W", "--workspace",
     "-a", "--add-path", "-A", "--exclude-path",
     "-s", "--suffix", "-S", "--exclude-suffix",
-    "-g", "--include-lang", "-G", "--exclude-lang",
     "-n", "--total-lines", "-N", "--start-line",
-    "-t", "--template", "-o", "--output", "-O", "--alias",
+    "-t", "--template", "-o", "--output",
     "-u", "--wrap", "--ai-model", "--ai-system-prompt",
     "--ai-seeds", "--ai-temperature", "--ai-top-p",
     "--ai-presence-penalty", "--ai-frequency-penalty",
-    "-e", "--env", "-E", "--global-env", "-X", "--context",
+    "-e", "--env", "-E", "--global-env",
 }
-
-
-def _resolve_template(workspace: Path, root: Path, raw: str) -> Path:
-    """
-    Resolve *raw* (possibly relative) template path obeying workspace rules.
-
-    Search order:
-    1.  workspace / raw           (spec behaviour)
-    2.  root      / raw           (fallback)
-    3.  absolute, if caller passed an absolute path
-    """
-    p = Path(raw).expanduser()
-    if p.is_absolute():
-        return p
-    cand1 = (workspace / p).resolve()
-    if cand1.exists():
-        return cand1
-    cand2 = (root / p).resolve()
-    if cand2.exists():
-        return cand2
-    return cand1  # let caller raise if it truly does not exist
 
 
 def _strip_none(tokens: List[str]) -> List[str]:
     """
-    Remove any *value* flag whose associated argument is the literal ``none``.
-    Previous occurrences of the same flag (and their values) are also dropped
-    so that a trailing “‑‑flag none” truly disables the setting.
+    Remove *both* a flag and its value when the value is literally “none”.
     """
     disabled: set[str] = set()
     i = 0
@@ -201,7 +200,7 @@ def _strip_none(tokens: List[str]) -> List[str]:
         else:
             i += 1
 
-    clean: List[str] = []
+    cleaned: List[str] = []
     skip_next = False
     for tok in tokens:
         if skip_next:
@@ -210,12 +209,15 @@ def _strip_none(tokens: List[str]) -> List[str]:
         if tok in _VALUE_FLAGS and tok in disabled:
             skip_next = True
             continue
-        clean.append(tok)
-    return clean
+        cleaned.append(tok)
+    return cleaned
 
 
 def _substitute_env(tokens: List[str], env_map: Dict[str, str]) -> List[str]:
-    """Return *tokens* with ``$var`` replaced by *env_map* values."""
+    """
+    Replace every «$VAR» occurrence with its value from *env_map*.
+    Missing variables are expanded into an empty string.
+    """
     out: List[str] = []
     skip_value = False
     for tok in tokens:
@@ -223,16 +225,20 @@ def _substitute_env(tokens: List[str], env_map: Dict[str, str]) -> List[str]:
             out.append(tok)
             skip_value = False
             continue
+
         if tok in ("-e", "--env", "-E", "--global-env"):
             out.append(tok)
             skip_value = True
             continue
+
         out.append(_ENV_REF.sub(lambda m: env_map.get(m.group(1), ""), tok))
     return out
 
 
-def _collect_env(tokens: Sequence[str]) -> Dict[str, str]:
-    """Collect ``VAR=VAL`` entries from every ``-e``/``-E`` within *tokens*."""
+def _collect_env_from_tokens(tokens: Sequence[str]) -> Dict[str, str]:
+    """
+    Scan *tokens* and gather every definition that follows “‑e/‑E”.
+    """
     env_map: Dict[str, str] = {}
     it = iter(tokens)
     for tok in it:
@@ -243,451 +249,478 @@ def _collect_env(tokens: Sequence[str]) -> Dict[str, str]:
                 _fatal(f"flag {tok} expects VAR=VAL")
             if "=" not in kv:
                 _fatal(f"{tok} expects VAR=VAL (got '{kv}')")
-            k, v = kv.split("=", 1)
-            env_map[k] = v
+            key, val = kv.split("=", 1)
+            env_map[key] = val
     return env_map
 
 
-def _expand_tokens(
-    tokens: List[str],
-    inherited_env: Dict[str, str],
-) -> List[str]:
+def _expand_tokens(tokens: List[str], inherited_env: Dict[str, str]) -> List[str]:
     """
-    • Merge *inherited_env* with local ``-e``/``-E`` definitions.
-    • Substitute ``$var`` using the merged map.
-    • Remove “none” switches.
+    Perform a full expansion pass:
+
+    1. Gather all env definitions on the line.
+    2. Substitute “$VAR”.
+    3. Strip any “none”‑disabled flags.
     """
-    env_map = {**inherited_env, **_collect_env(tokens)}
-    substituted = _substitute_env(tokens, env_map)
-    return _strip_none(substituted)
+    env_all = {**inherited_env, **_collect_env_from_tokens(tokens)}
+    return _strip_none(_substitute_env(tokens, env_all))
 
 
-# ───────────────────────────── CLI parser ─────────────────────────
-def _split_list(raw: Optional[List[str]]) -> List[str]:
-    """Return a flat list splitting comma‑separated tokens."""
-    if not raw:
-        return []
-    flat: List[str] = []
-    for item in raw:
-        flat.extend([p.strip() for p in re.split(r"[,\s]+", item) if p.strip()])
-    return flat
+def _refresh_env_values(env_map: Dict[str, str]) -> None:
+    """
+    Re‑evaluate *env_map* until no “$VAR” references remain.
+
+    This is performed after *raw‑concat*, *template* and *AI* stages, because
+    those stages might add new variables that are referenced by others.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for key, val in list(env_map.items()):
+            new_val = _ENV_REF.sub(lambda m: env_map.get(m.group(1), ""), val)
+            if new_val != val:
+                env_map[key] = new_val
+                changed = True
 
 
+# ─────────────────────── argparse builder (no “‑X”)  ────────────────────────
 def _build_parser() -> argparse.ArgumentParser:
     """
-    Return the fully configured argparse parser used at every level.
-
-    The parser definition is unchanged; refer to previous commits for
-    exhaustive help strings and grouping.
+    Build and return an `argparse.ArgumentParser` suitable for a single
+    context block.
     """
     p = argparse.ArgumentParser(
         prog="ghconcat",
         formatter_class=argparse.RawTextHelpFormatter,
-        usage="%(prog)s [-x FILE] [-X FILE] -g LANG -a PATH [...] [OPTIONS]",
-        description=(
-            "Concatenate, slice and post‑process source files with optional "
-            "AI integration and multi‑level batching."
-        ),
+        usage="%(prog)s [‑x FILE] … [OPTIONS]",
         add_help=False,
     )
 
-    # Groups ────────────────────────────────────────────────────────────
-    grp_batch = p.add_argument_group("Batching / nesting")
-    grp_loc = p.add_argument_group("Location & discovery")
-    grp_lang = p.add_argument_group("Language filters")
-    grp_rng = p.add_argument_group("Line‑range slicing")
-    grp_cln = p.add_argument_group("Cleaning options")
-    grp_out = p.add_argument_group("Output, templating & variables")
-    grp_ai = p.add_argument_group("AI integration")
-    grp_misc = p.add_argument_group("Miscellaneous")
+    # ── groups
+    g_loc = p.add_argument_group("Discovery")
+    g_rng = p.add_argument_group("Line slicing")
+    g_cln = p.add_argument_group("Cleaning")
+    g_tpl = p.add_argument_group("Template & output")
+    g_ai = p.add_argument_group("AI integration")
+    g_misc = p.add_argument_group("Misc")
 
-    # Batching
-    grp_batch.add_argument("-x", "--directives", action="append", dest="x", metavar="FILE")
-    grp_batch.add_argument("-X", "--context", action="append", dest="batch_directives", metavar="FILE")
+    # ── discovery
+    g_loc.add_argument("-w", "--workdir", dest="workdir", metavar="DIR")
+    g_loc.add_argument("-W", "--workspace", dest="workspace", metavar="DIR")
+    g_loc.add_argument("-a", "--add-path", action="append", dest="add_path", metavar="PATH")
+    g_loc.add_argument("-A", "--exclude-path", action="append", dest="exclude_path", metavar="DIR")
+    g_loc.add_argument("-s", "--suffix", action="append", dest="suffix", metavar="SUF")
+    g_loc.add_argument("-S", "--exclude-suffix", action="append", dest="exclude_suf", metavar="SUF")
 
-    # Location
-    grp_loc.add_argument("-w", "--workdir", dest="workdir", metavar="DIR")
-    grp_loc.add_argument("-W", "--workspace", dest="workspace", metavar="DIR")
-    grp_loc.add_argument("-a", "--add-path", action="append", dest="add_path", metavar="PATH")
-    grp_loc.add_argument("-A", "--exclude-path", action="append", dest="exclude_dir", metavar="DIR")
-    grp_loc.add_argument("-s", "--suffix", action="append", dest="suffix", metavar="SUF")
-    grp_loc.add_argument("-S", "--exclude-suffix", action="append", dest="exclude", metavar="PAT")
+    # ── line range
+    g_rng.add_argument("-n", "--total-lines", dest="total_lines", type=int, metavar="NUM")
+    g_rng.add_argument("-N", "--start-line", dest="first_line", type=int, metavar="LINE")
+    g_rng.add_argument("-m", "--keep-first-line", dest="first_flags",
+                       action="append_const", const="keep")
+    g_rng.add_argument("-M", "--no-first-line", dest="first_flags",
+                       action="append_const", const="drop")
 
-    # Languages
-    grp_lang.add_argument("-g", "--include-lang", action="append", dest="lang", metavar="LANG")
-    grp_lang.add_argument("-G", "--exclude-lang", action="append", dest="skip_langs", metavar="LANG")
+    # ── cleaning
+    g_cln.add_argument("-c", "--remove-comments", dest="rm_simple", action="store_true")
+    g_cln.add_argument("-C", "--remove-all-comments", dest="rm_all", action="store_true")
+    g_cln.add_argument("-i", "--remove-import", dest="rm_import", action="store_true")
+    g_cln.add_argument("-I", "--remove-export", dest="rm_export", action="store_true")
+    g_cln.add_argument("-B", "--keep-blank", dest="blank_flags",
+                       action="append_const", const="keep")
+    g_cln.add_argument("-b", "--strip-blank", dest="blank_flags",
+                       action="append_const", const="strip")
 
-    # Line‑range
-    grp_rng.add_argument("-n", "--total-lines", dest="total_lines", type=int, metavar="NUM")
-    grp_rng.add_argument("-N", "--start-line", dest="first_line", type=int, metavar="LINE")
-    grp_rng.add_argument("-H", "--keep-header", action="store_true", dest="keep_header")
+    # ── template & output
+    g_tpl.add_argument("-t", "--template", dest="template", metavar="FILE")
+    g_tpl.add_argument("-o", "--output", dest="output", metavar="FILE")
+    g_tpl.add_argument("-u", "--wrap", dest="wrap_lang", metavar="LANG")
+    g_tpl.add_argument("-U", "--no-wrap", dest="unwrap", action="store_true")
+    g_tpl.add_argument("-h", "--header", dest="hdr_flags",
+                       action="append_const", const="show")
+    g_tpl.add_argument("-H", "--no-headers", dest="hdr_flags",
+                       action="append_const", const="hide")
+    g_tpl.add_argument("-r", "--relative-path", dest="path_flags",
+                       action="append_const", const="relative")
+    g_tpl.add_argument("-R", "--absolute-path", dest="path_flags",
+                       action="append_const", const="absolute")
+    g_tpl.add_argument("-l", "--list", dest="list_only", action="store_true")
+    g_tpl.add_argument("-e", "--env", dest="env_vars", action="append", metavar="VAR=VAL")
+    g_tpl.add_argument("-E", "--global-env", dest="global_env", action="append", metavar="VAR=VAL")
 
-    # Cleaning
-    grp_cln.add_argument("-c", "--remove-comments", dest="rm_simple", action="store_true")
-    grp_cln.add_argument("-C", "--remove-all-comments", dest="rm_all", action="store_true")
-    grp_cln.add_argument("-i", "--remove-import", dest="rm_import", action="store_true")
-    grp_cln.add_argument("-I", "--remove-export", dest="rm_export", action="store_true")
-    grp_cln.add_argument("-B", "--keep-blank", action="store_true", dest="keep_blank")
+    # ── AI
+    g_ai.add_argument("--ai", action="store_true")
+    g_ai.add_argument("--ai-model", default=DEFAULT_OPENAI_MODEL, metavar="MODEL")
+    g_ai.add_argument("--ai-temperature", type=float, metavar="NUM")
+    g_ai.add_argument("--ai-top-p", type=float, metavar="NUM")
+    g_ai.add_argument("--ai-presence-penalty", type=float, metavar="NUM")
+    g_ai.add_argument("--ai-frequency-penalty", type=float, metavar="NUM")
+    g_ai.add_argument("--ai-system-prompt", metavar="FILE")
+    g_ai.add_argument("--ai-seeds", metavar="FILE")
 
-    # Output / templating / variables
-    grp_out.add_argument("-t", "--template", dest="template", metavar="FILE")
-    grp_out.add_argument("-o", "--output", dest="output", metavar="FILE")
-    grp_out.add_argument("-O", "--alias", dest="alias", metavar="ALIAS")
-    grp_out.add_argument("-u", "--wrap", dest="wrap_lang", metavar="LANG")
-    grp_out.add_argument("-l", "--list", dest="list_only", action="store_true")
-    grp_out.add_argument("-p", "--absolute-path", dest="absolute_path", action="store_true")
-    grp_out.add_argument("-P", "--no-headers", dest="skip_headers", action="store_true")
-    grp_out.add_argument("-e", "--env", dest="env_vars", action="append", metavar="VAR=VAL")
-    grp_out.add_argument("-E", "--global-env", dest="global_env_vars", action="append", metavar="VAR=VAL")
-
-    # AI
-    grp_ai.add_argument("--ai", dest="ai", action="store_true")
-    grp_ai.add_argument("--ai-model", dest="ai_model", default=DEFAULT_OPENAI_MODEL, metavar="MODEL")
-    grp_ai.add_argument("--ai-temperature", dest="temperature", type=float, metavar="NUM")
-    grp_ai.add_argument("--ai-top-p", dest="top_p", type=float, metavar="NUM")
-    grp_ai.add_argument("--ai-presence-penalty", dest="presence_penalty", type=float, metavar="NUM")
-    grp_ai.add_argument("--ai-frequency-penalty", dest="frequency_penalty", type=float, metavar="NUM")
-    grp_ai.add_argument("--ai-system-prompt", dest="ai_system_prompt", metavar="FILE")
-    grp_ai.add_argument("--ai-seeds", dest="ai_seeds", metavar="FILE")
-
-    grp_misc.add_argument("-U", "--upgrade", dest="upgrade", action="store_true")
-    grp_misc.add_argument("-h", "--help", action="help")
+    # ── misc
+    g_misc.add_argument("--upgrade", action="store_true")
+    g_misc.add_argument("--help", action="help")
 
     return p
 
 
-# ─────────────────────── Parsing & basic checks ───────────────────────
+# ───────────────────────  Namespace post‑processing  ────────────────────────
 def _post_parse(ns: argparse.Namespace) -> None:
-    """Derive helper attributes."""
-    last_lang = ns.lang[-1] if ns.lang else ""
-    ns.languages = _split_list([last_lang])
-    ns.skip_langs = _split_list(ns.skip_langs)
-
-
-def _gather_top_level(argv: Sequence[str]) -> tuple[List[str], List[str]]:
     """
-    Split *argv* into (x_batches, cli_tokens).
-
-    * All occurrences of “‑x FILE” are collected **in order** and expanded.
-    * The remaining tokens are returned unchanged preserving original order.
+    Normalize tri‑state flags after `parse_args` has run.
     """
-    x_tokens: List[str] = []
-    cli_tokens: List[str] = []
+    # Blank‑line policy
+    flags = set(ns.blank_flags or [])
+    ns.keep_blank = "keep" in flags or "strip" not in flags
 
-    it = iter(argv)
-    for tok in it:
-        if tok in ("-x", "--directives"):
-            try:
-                fpath = Path(next(it))
-            except StopIteration:
-                _fatal("missing FILE after ‑x/‑‑directives")
-            if not fpath.exists():
-                _fatal(f"directive file {fpath} not found")
-            x_tokens.extend(_parse_directive_file(fpath))
-        else:
-            cli_tokens.append(tok)
+    # First‑line policy
+    first = set(ns.first_flags or [])
+    if "drop" in first:
+        ns.keep_header = False
+    else:
+        ns.keep_header = "keep" in first
 
-    return x_tokens, cli_tokens
+    # Header visibility
+    hdr = set(ns.hdr_flags or [])
+    ns.skip_headers = not ("show" in hdr and "hide" not in hdr)
 
+    # Absolute / relative
+    pathf = set(ns.path_flags or [])
+    ns.absolute_path = "absolute" in pathf and "relative" not in pathf
 
-def _parse_cli(argv: Sequence[str]) -> argparse.Namespace:
-    """
-    Return the parsed Namespace after handling multi‑batch expansion,
-    env substitution and “none” disabling at *level 1*.
-    """
-    x_tokens, cli_tokens = _gather_top_level(argv)
-    tokens = [*x_tokens, *cli_tokens]
-    tokens = _expand_tokens(tokens, {})
-    ns = _build_parser().parse_args(tokens)
-    _post_parse(ns)
-    return ns
+    # Wrap fences
+    if ns.unwrap:
+        ns.wrap_lang = None
 
 
-# ───────────────────── Pattern helpers ─────────────────────
-def _discard_comment(line: str, ext: str, simple: bool, full: bool) -> bool:
-    rules = _COMMENT_RULES.get(ext)
-    if not rules:
-        return False
-    trimmed = line.rstrip()
-    return (
-        (full and rules[1].match(trimmed)) or
-        (simple and rules[0].match(trimmed))
-    )
+# ─────────────────────────  Utility helpers  ────────────────────────────────
+def _split_list(raw: Optional[List[str]]) -> List[str]:
+    """Return a flat list splitting comma‑ or space‑separated tokens."""
+    if not raw:
+        return []
+    out: List[str] = []
+    for itm in raw:
+        out.extend([x for x in re.split(r"[,\s]+", itm) if x])
+    return out
 
 
-def _discard_import(line: str, ext: str, enable: bool) -> bool:
-    rules = _COMMENT_RULES.get(ext)
-    return bool(enable and rules and rules[2] and rules[2].match(line))
+def _resolve_path(base: Path, maybe: Optional[str]) -> Path:
+    """Resolve *maybe* against *base* unless it is already absolute."""
+    if maybe is None:
+        return base
+    pth = Path(maybe).expanduser()
+    return pth if pth.is_absolute() else (base / pth).resolve()
 
 
-def _discard_export(line: str, ext: str, enable: bool) -> bool:
-    rules = _COMMENT_RULES.get(ext)
-    return bool(enable and rules and rules[3] and rules[3].match(line))
-
-
-def _clean_lines(
-    src: Iterable[str],
-    ext: str,
-    rm_simple: bool,
-    rm_all: bool,
-    rm_import: bool,
-    rm_export: bool,
-    keep_blank: bool,
-) -> List[str]:
-    cleaned: List[str] = []
-    for l in src:
-        if _discard_comment(l, ext, rm_simple, rm_all):
-            continue
-        if _discard_import(l, ext, rm_import):
-            continue
-        if _discard_export(l, ext, rm_export):
-            continue
-        if not keep_blank and _RE_BLANK.match(l):
-            continue
-        cleaned.append(l)
-    return cleaned
-
-
-# ───────────────────── File discovery helpers ─────────────────────
+# ───────────────────────────  File discovery  ───────────────────────────────
 def _hidden(p: Path) -> bool:
+    """Return *True* for hidden files / directories (leading dot)."""
     return any(part.startswith(".") for part in p.parts)
 
 
-def _collect_files(
-    add_path: List[Path],
-    excludes: List[str],
-    exclude_dirs: List[Path],
-    suffixes: List[str],
-    active_exts: Optional[Set[str]],
+def _gather_files(
+        add_path: List[Path],
+        exclude_dirs: List[Path],
+        suffixes: List[str],
+        exclude_suf: List[str],
 ) -> List[Path]:
-    ex_dirs = {d.resolve() for d in exclude_dirs}
+    """
+    Walk *add_path* and return every file that matches inclusion / exclusion
+    rules. Explicit files always win.
+    """
     collected: Set[Path] = set()
 
-    def _dir_excluded(p: Path) -> bool:
-        return any(_is_within(p, d) for d in ex_dirs)
+    explicit_files = [p for p in add_path if p.is_file()]
+    dir_paths = [p for p in add_path if not p.is_file()]
 
-    def _consider(fp: Path) -> None:
-        ext = fp.suffix.lower()
-        if ext in ".gcx":
-            return
-        if active_exts is not None and ext not in active_exts:
-            return
-        if _hidden(fp) or _dir_excluded(fp):
-            return
-        if ext == ".dart" and fp.name.endswith(".g.dart"):
-            return
-        if fp.name.endswith((".pyc", ".pyo")):
-            return
-        if excludes and any(pat in str(fp) for pat in excludes):
-            return
-        if suffixes and not any(fp.name.endswith(s) for s in suffixes):
-            return
+    suffixes = [s if s.startswith(".") else f".{s}" for s in suffixes]
+    exclude_suf = [s if s.startswith(".") else f".{s}" for s in exclude_suf]
+    excl_set = set(exclude_suf) - set(suffixes)
+
+    ex_dirs = {d.resolve() for d in exclude_dirs}
+
+    def _dir_excluded(path: Path) -> bool:
+        return any(_is_within(path, ex) for ex in ex_dirs)
+
+    # Explicit files first
+    for fp in explicit_files:
         collected.add(fp.resolve())
 
-    for root in add_path:
+    for root in dir_paths:
         if not root.exists():
-            print(f"ⓘ warning: {root} does not exist; skipping", file=sys.stderr)
-            continue
-        if root.is_file():
-            _consider(root)
+            print(f"⚠  {root} does not exist – skipped", file=sys.stderr)
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [
                 d for d in dirnames
-                if not d.startswith(".") and not _dir_excluded(Path(dirpath, d).resolve())
+                if not d.startswith(".") and not _dir_excluded(Path(dirpath, d))
             ]
-            for fname in filenames:
-                _consider(Path(dirpath, fname).resolve())
+            for fn in filenames:
+                fp = Path(dirpath, fn)
+                if _hidden(fp) or _dir_excluded(fp):
+                    continue
+                if suffixes and not any(fp.name.endswith(s) for s in suffixes):
+                    continue
+                if any(fp.name.endswith(s) for s in excl_set):
+                    continue
+                if fp.name.endswith((".pyc", ".pyo")):
+                    continue
+                collected.add(fp.resolve())
 
     return sorted(collected, key=str)
 
 
-# ───────────────────── Concatenation helpers ─────────────────────
-def _slice_raw(
-    raw: List[str],
-    first_line: Optional[int],
-    total_lines: Optional[int],
-    keep_header: bool,
+# ─────────────────────  Cleaning / slicing primitives  ──────────────────────
+def _discard_comment(line: str, ext: str, simple: bool, full: bool) -> bool:
+    """Return *True* if *line* must be discarded as a comment."""
+    rules = _COMMENT_RULES.get(ext)
+    return bool(rules and ((full and rules[1].match(line)) or (simple and rules[0].match(line))))
+
+
+def _discard_import(line: str, ext: str, rm_imp: bool) -> bool:
+    """Return *True* if *line* must be discarded because it is an import."""
+    rules = _COMMENT_RULES.get(ext)
+    return bool(rules and rm_imp and rules[2] and rules[2].match(line))
+
+
+def _discard_export(line: str, ext: str, rm_exp: bool) -> bool:
+    """Return *True* if *line* must be discarded because it is an export."""
+    rules = _COMMENT_RULES.get(ext)
+    return bool(rules and rm_exp and rules[3] and rules[3].match(line))
+
+
+def _slice(
+        raw: List[str],
+        begin: Optional[int],
+        total: Optional[int],
+        keep_header: bool,
 ) -> List[str]:
+    """
+    Return a view of *raw* according to line-slicing flags.
+
+    Bug-fix (2025-08-06): remove any “# line 1…” only when the slice
+    **does not start at line 1** (start > 1) and the first line is dropped.
+    """
     if not raw:
         return []
-    start = max(first_line or 1, 1)
-    end = start + total_lines - 1 if total_lines else len(raw)
-    selected = raw[start - 1:end]
+
+    start = max(1, begin or 1)
+    end_excl = start - 1 + (total or len(raw) - start + 1)
+    segment = raw[start - 1:end_excl]
+
     if keep_header and start > 1:
-        selected = [raw[0], *selected]
-    return selected
+        segment = [raw[0], *segment]
+
+    # Evita colisiones solo si el rango NO arranca en 1
+    if not keep_header and start > 1:
+        segment = [ln for ln in segment if not _LINE1_RE.match(ln)]
+
+    return segment
 
 
-def _concat(
-    files: List[Path],
-    ns: argparse.Namespace,
-    wrapped: Optional[List[Tuple[str, str]]] = None,
-    header_root: Optional[Path] = None,
-) -> str:
-    pieces: List[str] = []
-    base_root = header_root or Path.cwd()
-
-    for fp in files:
-        ext = fp.suffix.lower()
-
-        with fp.open("r", encoding="utf-8", errors="ignore") as src:
-            raw_lines = list(src)
-        slice_raw = _slice_raw(
-            raw_lines, ns.first_line, ns.total_lines, ns.keep_header
-        )
-
-        cleaned = _clean_lines(
-            slice_raw,
-            ext,
-            ns.rm_simple or ns.rm_all,
-            ns.rm_all,
-            ns.rm_import,
-            ns.rm_export,
-            ns.keep_blank,
-        )
-
-        empty_body = not cleaned or not "".join(cleaned).strip()
-        if empty_body and not ns.list_only:
+def _clean(
+        lines: Iterable[str],
+        ext: str,
+        *,
+        rm_simple: bool,
+        rm_all: bool,
+        rm_imp: bool,
+        rm_exp: bool,
+        keep_blank: bool,
+) -> List[str]:
+    """Apply comment / import / blank‑line filters to *lines*."""
+    out: List[str] = []
+    for ln in lines:
+        if _discard_comment(ln, ext, rm_simple, rm_all):
             continue
+        if _discard_import(ln, ext, rm_imp):
+            continue
+        if _discard_export(ln, ext, rm_exp):
+            continue
+        if not keep_blank and _RE_BLANK.match(ln):
+            continue
+        out.append(ln)
+    return out
 
-        if ns.absolute_path:
-            header_path = str(fp)
-        else:
-            try:
-                header_path = str(fp.relative_to(base_root))
-            except ValueError:
-                header_path = os.path.relpath(fp, base_root)
 
-        if not ns.skip_headers:
-            if pieces and not pieces[-1].endswith("\n"):
-                pieces[-1] += "\n"
-            header = f"{HEADER_DELIM}{header_path} {HEADER_DELIM}\n"
-            pieces.append(header)
+# ─────────────────────────────  Concatenation  ──────────────────────────────
+def _concat_files(
+        files: List[Path],
+        ns: argparse.Namespace,
+        *,
+        header_root: Path,
+        wrapped: Optional[List[Tuple[str, str]]] = None,
+) -> str:
+    """
+    Concatenate *files* applying cleaning, headers and optional wrapping.
+    """
+    parts: List[str] = []
+    comment_prefix = {
+        ".py": "# ",
+        ".js": "// ",
+        ".dart": "// ",
+        ".go": "// ",
+        ".yml": "# ",
+        ".yaml": "# ",
+        ".xml": "<!-- ",
+        ".csv": "# ",
+    }
+
+    for idx, fp in enumerate(files):
+        ext = fp.suffix.lower()
+        with fp.open("r", encoding="utf-8", errors="ignore") as fh:
+            raw_lines = list(fh)
+
+        body_lines = _clean(
+            _slice(raw_lines, ns.first_line, ns.total_lines, ns.keep_header),
+            ext,
+            rm_simple=ns.rm_simple or ns.rm_all,
+            rm_all=ns.rm_all,
+            rm_imp=ns.rm_import,
+            rm_exp=ns.rm_export,
+            keep_blank=ns.keep_blank,
+        )
 
         if ns.list_only:
+            rel = str(fp) if ns.absolute_path else os.path.relpath(fp, header_root)
+            parts.append(rel + "\n")
             continue
 
-        body = "".join(cleaned)
-        pieces.append(body)
-        if ns.keep_blank:
-            pieces.append("\n")
+        if not body_lines or not "".join(body_lines).strip():
+            continue
+
+        hdr_path = str(fp) if ns.absolute_path else os.path.relpath(fp, header_root)
+
+        # Traditional header (if “‑h”)
+        if not ns.skip_headers and hdr_path not in _SEEN_FILES:
+            parts.append(f"{HEADER_DELIM}{hdr_path} {HEADER_DELIM}\n")
+            _SEEN_FILES.add(hdr_path)
+
+        # Lightweight comment header (if “‑h” not requested)
+        if ns.skip_headers:
+            prefix = comment_prefix.get(ext, "# ")
+            suffix = " -->\n" if prefix.startswith("<!--") else "\n"
+            parts.append(f"{prefix}{hdr_path}{suffix}")
+
+        body = "".join(body_lines)
+        parts.append(body)
 
         if wrapped is not None:
-            wrapped.append((header_path, body.rstrip()))
+            wrapped.append((hdr_path, body.rstrip()))
 
-    return "".join(pieces)
+        if ns.keep_blank and (
+                idx < len(files) - 1
+                or (
+                        idx == len(files) - 1
+                        and ns.total_lines is None
+                        and ns.first_line is None
+                )
+        ):
+            parts.append("\n")
+
+    return "".join(parts)
 
 
-# ───────────────────── AI helpers ─────────────────────
-def _interpolate(template: str, mapping: Dict[str, str]) -> str:
-    """Replace each ``{var}`` occurrence using *mapping*."""
-    return _PLACEHOLDER.sub(lambda m: mapping.get(m.group(1), m.group(0)), template)
+# ─────────────────────────────  AI helpers  ─────────────────────────────────
+def _interpolate(tpl: str, mapping: Dict[str, str]) -> str:
+    """Simple placeholder {var} → mapping[var] (missing ⇒ empty)."""
+    return _PLACEHOLDER.sub(lambda m: mapping.get(m.group(1), ""), tpl)
 
 
-def _call_openai(
-    prompt: str,
-    out_path: Path,
-    model: str,
-    system_prompt: str,
-    *,
-    temperature: float | None = None,
-    top_p: float | None = None,
-    presence_penalty: float | None = None,
-    frequency_penalty: float | None = None,
-    seeds_path: Optional[Path] = None,
-    timeout: int = 1800,
+def _call_openai(  # pragma: no cover
+        prompt: str,
+        out_path: Path,
+        *,
+        model: str,
+        system_prompt: str,
+        temperature: float | None,
+        top_p: float | None,
+        presence_pen: float | None,
+        freq_pen: float | None,
+        seeds_path: Optional[Path],
+        timeout: int = 1800,
 ) -> None:
     """
-    Send *prompt* to OpenAI and write the assistant reply to *out_path*.
-
-    When *seeds_path* is provided, every JSON object line (OpenAI fine‑tune
-    style) is appended before *prompt* respecting its original role.
+    Send *prompt* to OpenAI unless GHCONCAT_DISABLE_AI=1 – in that case write
+    “AI‑DISABLED”.
     """
-    if openai is None:
-        _fatal("openai not installed. Run: pip install openai")
-    if not (key := os.getenv("OPENAI_API_KEY")):
-        _fatal("OPENAI_API_KEY not defined.")
+    if os.getenv("GHCONCAT_DISABLE_AI") == "1":
+        out_path.write_text("AI-DISABLED", encoding="utf-8")
+        return
 
-    client = openai.OpenAI(api_key=key)  # type: ignore[attr-defined]
-    messages: list[dict[str, str]] = (
+    if openai is None or not os.getenv("OPENAI_API_KEY"):
+        out_path.write_text("⚠ OpenAI disabled", encoding="utf-8")
+        return
+
+    client = openai.OpenAI()  # type: ignore[attr-defined]
+
+    messages = (
         [{"role": "system", "content": system_prompt}] if system_prompt else []
     )
-
     if seeds_path and seeds_path.exists():
-        for line in seeds_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
+        for ln in seeds_path.read_text(encoding="utf-8").splitlines():
+            if not ln.strip():
                 continue
             try:
-                obj = json.loads(line)
-                if isinstance(obj, dict) and "role" in obj and "content" in obj:
-                    messages.append({"role": obj["role"], "content": obj["content"]})
+                obj = json.loads(ln)
+                if isinstance(obj, dict) and {"role", "content"} <= obj.keys():
+                    messages.append(
+                        {"role": obj["role"], "content": obj["content"]}
+                    )
                 else:
-                    messages.append({"role": "user", "content": line.strip()})
+                    messages.append({"role": "user", "content": ln.strip()})
             except json.JSONDecodeError:
-                messages.append({"role": "user", "content": line.strip()})
+                messages.append({"role": "user", "content": ln.strip()})
 
     messages.append({"role": "user", "content": prompt})
 
-    params: dict[str, object] = {"model": model, "messages": messages, "timeout": timeout}
-    fixed_temp_models: set[str] = {"o3"}
-    if not any(model.lower().startswith(m) for m in fixed_temp_models):
+    params: Dict[str, object] = {"model": model, "messages": messages, "timeout": timeout}
+    if not model.lower().startswith("o3"):
         if temperature is not None:
             params["temperature"] = temperature
         if top_p is not None:
             params["top_p"] = top_p
-        if presence_penalty is not None:
-            params["presence_penalty"] = presence_penalty
-        if frequency_penalty is not None:
-            params["frequency_penalty"] = frequency_penalty
+        if presence_pen is not None:
+            params["presence_penalty"] = presence_pen
+        if freq_pen is not None:
+            params["frequency_penalty"] = freq_pen
+
     try:
         rsp = client.chat.completions.create(**params)  # type: ignore[arg-type]
         out_path.write_text(rsp.choices[0].message.content, encoding="utf-8")
-        print(f"✔ AI reply saved → {out_path}")
-    except OpenAIError as exc:  # type: ignore[misc]
-        _fatal(f"OpenAI error: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        out_path.write_text(f"⚠ OpenAI error: {exc}", encoding="utf-8")
 
 
-# ───────────────────── Namespace inheritance helpers ─────────────────────
-_LIST_ATTRS = {
-    "add_path", "exclude_dir", "suffix", "exclude",
-    "lang", "skip_langs",
+# ─────────────────────────────  Merge helpers  ──────────────────────────────
+_LIST_ATTRS: Set[str] = {
+    "add_path", "exclude_path", "suffix", "exclude_suf",
+    "hdr_flags", "path_flags", "blank_flags", "first_flags",
 }
-_BOOL_ATTRS = {
+_BOOL_ATTRS: Set[str] = {
     "rm_simple", "rm_all", "rm_import", "rm_export",
     "keep_blank", "list_only", "absolute_path", "skip_headers",
     "keep_header",
 }
-_INT_ATTRS = {"total_lines", "first_line"}
-_STR_ATTRS = {
+_INT_ATTRS: Set[str] = {"total_lines", "first_line"}
+_STR_ATTRS: Set[str] = {
     "workdir", "workspace", "template", "wrap_lang",
-    "suffix", "exclude", "ai_model", "ai_system_prompt", "ai_seeds",
+    "ai_model", "ai_system_prompt", "ai_seeds",
 }
-
-_SCALAR_FLOAT_ATTRS = {
-    "temperature", "top_p", "presence_penalty", "frequency_penalty",
+_FLT_ATTRS: Set[str] = {
+    "ai_temperature",
+    "ai_top_p",
+    "ai_presence_penalty",
+    "ai_frequency_penalty",
 }
-
-# Attributes *not* inherited (per specification)
-_NON_INHERITED = {
-    "output", "alias", "ai",  # context‑local
-    "batch_directives", "x", "upgrade",
-}
+_NON_INHERITED: Set[str] = {"output", "unwrap", "ai"}
 
 
-def _merge_namespaces(
-    parent: argparse.Namespace,
-    child: argparse.Namespace,
-) -> argparse.Namespace:
+def _merge_ns(parent: argparse.Namespace, child: argparse.Namespace) -> argparse.Namespace:
     """
-    Produce a new Namespace resulting from inheriting *parent* into *child*.
-
-    ‑ List attributes are concatenated (parent + child).
-    ‑ Boolean attributes use logical OR (they cannot be disabled downstream).
-    ‑ Scalars override only when *child* provides a non‑null value.
+    Return a **new** namespace = parent ⊕ child (child overrides, lists extend).
     """
     merged = deepcopy(vars(parent))
-
     for key, val in vars(child).items():
         if key in _NON_INHERITED:
             merged[key] = val
@@ -696,8 +729,8 @@ def _merge_namespaces(
         if key in _LIST_ATTRS:
             merged[key] = [*(merged.get(key) or []), *(val or [])]
         elif key in _BOOL_ATTRS:
-            merged[key] = merged.get(key, False) or bool(val)
-        elif key in _INT_ATTRS | _SCALAR_FLOAT_ATTRS:
+            merged[key] = val or merged.get(key, False)
+        elif key in _INT_ATTRS | _FLT_ATTRS:
             merged[key] = val if val is not None else merged.get(key)
         elif key in _STR_ATTRS:
             merged[key] = val if val not in (None, "") else merged.get(key)
@@ -709,282 +742,205 @@ def _merge_namespaces(
     return ns
 
 
-# ───────────────────── Recursive executor ─────────────────────
-def _ensure_defaults(ns: argparse.Namespace) -> None:
-    """Apply implicit defaults for “‑a .” and wildcard languages."""
-    if not ns.add_path and not ns.template:
-        ns.add_path = ["."]
-    if not ns.languages and ns.add_path:
-        ns.languages = _infer_langs_from_paths(ns.add_path)
+# ─────────────────────────────  Core executor  ──────────────────────────────
+def _parse_env_items(items: Optional[List[str]]) -> Dict[str, str]:
+    env_map: Dict[str, str] = {}
+    for itm in items or []:
+        if "=" not in itm:
+            _fatal(f"--env expects VAR=VAL (got '{itm}')")
+        key, val = itm.split("=", 1)
+        env_map[key] = val
+    return env_map
 
 
-def _infer_langs_from_paths(paths: List[str]) -> List[str]:
-    exts: set[str] = set()
-    for raw in paths:
-        path = Path(raw)
-        suf = path.suffix.lower()
-        if not suf or raw.endswith(("/", "\\")):
-            return []
-        exts.add(suf)
-    return sorted(exts)
+def _execute_node(
+        node: DirNode,
+        ns_parent: Optional[argparse.Namespace],
+        *,
+        level: int = 0,
+        parent_root: Optional[Path] = None,
+        parent_workspace: Optional[Path] = None,
+        inherited_vars: Optional[Dict[str, str]] = None,
+        gh_dump: Optional[List[str]] = None,
+) -> Tuple[Dict[str, str], str]:
+    """
+    Recursive executor. Returns *(vars, final_output)* for *node*.
+    """
+    inherited_vars = inherited_vars or {}
+    tokens = _expand_tokens(node.tokens, inherited_vars)
+    ns_self = _build_parser().parse_args(tokens)
+    _post_parse(ns_self)
+    ns_effective = _merge_ns(ns_parent, ns_self) if ns_parent else ns_self
 
-
-def _build_active_exts(langs: List[str], skips: List[str]) -> Optional[Set[str]]:
-    if not langs:
-        active = None
-    else:
-        active = set()
-        for token in langs:
-            token = token.lower()
-            if token in PRESETS:
-                active.update(PRESETS[token])
-            else:
-                active.add(token if token.startswith(".") else f".{token}")
-
-    for token in skips:
-        ext = token if token.startswith(".") else f".{token}"
-        if active is None:
-            continue
-        active.discard(ext)
-
-    if active == set():
-        _fatal("after apply all filters no active extension remains")
-    return active
-
-
-def _parse_env_list(env_items: List[str] | None) -> Dict[str, str]:
-    mapping: Dict[str, str] = {}
-    for item in env_items or []:
-        if "=" not in item:
-            _fatal(f"--env expects VAR=VAL pairs (got '{item}')")
-        k, v = item.split("=", 1)
-        mapping[k.strip()] = v
-    return mapping
-
-
-def _resolve_path(base: Path, child: Optional[str]) -> Path:
-    if child is None:
-        return base.resolve()
-    p = Path(child).expanduser()
-    return p.resolve() if p.is_absolute() else (base / p).resolve()
-
-
-def _resolve_workspace(workdir: Path, workspace_raw: Optional[str]) -> Path:
-    if workspace_raw is None:
-        return workdir
-    wp = Path(workspace_raw).expanduser()
-    return wp.resolve() if wp.is_absolute() else (workdir / wp).resolve()
-
-
-def _execute_single(
-    ns: argparse.Namespace,
-    workspace: Path,
-    root: Path,
-    *,
-    seen_files: Optional[Set[Path]] = None,
-) -> str:
-    add_path = [
-        Path(r).expanduser() if Path(r).is_absolute() else (root / r).resolve()
-        for r in ns.add_path or []
-    ]
-    exclude_dirs = [
-        (Path(d).expanduser() if Path(d).is_absolute() else (root / d)).resolve()
-        for d in ns.exclude_dir or []
-    ]
-
-    active_exts = _build_active_exts(ns.languages, ns.skip_langs)
-
-    files = _collect_files(
-        add_path=add_path,
-        excludes=ns.exclude or [],
-        exclude_dirs=exclude_dirs,
-        suffixes=ns.suffix or [],
-        active_exts=active_exts,
-    )
-
-    # Global de‑duplication (headers) when requested
-    if seen_files is not None:
-        uniq: List[Path] = []
-        for fp in files:
-            rp = fp.resolve()
-            if rp not in seen_files:
-                seen_files.add(rp)
-                uniq.append(fp)
-        files = uniq
-
-    if not files:
-        return ""
-
-    wrapped_chunks: Optional[List[Tuple[str, str]]] = [] if ns.wrap_lang else None
-    raw_dump = _concat(files, ns, wrapped_chunks, header_root=root)
-
-    if ns.wrap_lang and wrapped_chunks:
-        fenced = []
-        for p, c in wrapped_chunks:
-            if not c:
-                continue
-            header_str = "" if ns.skip_headers else f"{HEADER_DELIM}{p} {HEADER_DELIM}\n"
-            fenced.append(
-                f"{header_str}"
-                f"```{ns.wrap_lang or Path(p).suffix.lstrip('.')}\n{c.rstrip()}\n```\n"
-            )
-        return "".join(fenced)
-    return raw_dump
-
-
-def _execute(
-    ns: argparse.Namespace,
-    *,
-    level: int = 0,
-    parent_root: Optional[Path] = None,
-    parent_workspace: Optional[Path] = None,
-    inherited_vars: Optional[Dict[str, str]] = None,
-    inherited_seeds: Optional[str] = None,
-    seen_files: Optional[Set[Path]] = None,
-) -> tuple[Dict[str, str], str]:
     if level == 0:
-        seen_files = set() if ns.template is None else None
+        gh_dump = []
+        _SEEN_FILES.clear()  # header de‑dup reset
 
-    _ensure_defaults(ns)
+    root_base = parent_root or Path.cwd()
+    root = _resolve_path(root_base, ns_effective.workdir or ".")
 
-    root_ref = parent_root if level > 0 else Path.cwd()
-    root = _resolve_path(root_ref, ns.workdir or ".")
-    workspace = _resolve_workspace(parent_workspace or root, ns.workspace)
-
+    workspace = (
+        _resolve_path(parent_workspace or root, ns_effective.workspace)
+        if ns_effective.workspace
+        else root
+    )
     if not root.exists():
-        _fatal(f"--workdir {root} does not exist")
+        _fatal(f"--workdir {root} not found")
     if not workspace.exists():
-        _fatal(f"--workspace {workspace} does not exist")
+        _fatal(f"--workspace {workspace} not found")
 
-    local_vars: Dict[str, str] = dict(inherited_vars or {})
-    dumps: list[str] = []
+    # ── env ---------------------------------------------------------------
+    vars_local: Dict[str, str] = dict(inherited_vars)
+    vars_local.update(_parse_env_items(ns_effective.global_env))
+    vars_local.update(_parse_env_items(ns_effective.env_vars))
+    ctx_name = node.name
 
-    # ── Main concatenation ───────────────────────────────────────────
-    if ns.add_path:
-        dump_main = _execute_single(
-            ns,
-            workspace,
-            root,
-            seen_files=seen_files if ns.template is None else None,
+    # ── RAW CONCAT --------------------------------------------------------
+    dump_raw = ""
+    if ns_effective.add_path:
+        files = _gather_files(
+            add_path=[
+                Path(p) if Path(p).is_absolute() else (root / p).resolve()
+                for p in ns_effective.add_path
+            ],
+            exclude_dirs=[
+                Path(p) if Path(p).is_absolute() else (root / p).resolve()
+                for p in ns_effective.exclude_path or []
+            ],
+            suffixes=_split_list(ns_effective.suffix),
+            exclude_suf=_split_list(ns_effective.exclude_suf),
         )
-        if dump_main:
-            dumps.append(dump_main)
-        if ns.alias:  # first assignment (pre‑template)
-            local_vars[ns.alias] = dump_main
+        if files:
+            wrapped: Optional[List[Tuple[str, str]]] = (
+                [] if ns_effective.wrap_lang else None
+            )
+            dump_raw = _concat_files(files, ns_effective, header_root=root, wrapped=wrapped)
+            if ns_effective.wrap_lang and wrapped:
+                fenced = []
+                for hp, body in wrapped:
+                    hdr = (
+                        ""
+                        if ns_effective.skip_headers
+                        else f"{HEADER_DELIM}{hp} {HEADER_DELIM}\n"
+                    )
+                    fenced.append(
+                        f"{hdr}```{ns_effective.wrap_lang or Path(hp).suffix.lstrip('.')}\n"
+                        f"{body}\n```\n"
+                    )
+                dump_raw = "".join(fenced)
 
-    # ── Environment variables ───────────────────────────────────────
-    local_vars.update(_parse_env_list(ns.env_vars))
-    local_vars.update(_parse_env_list(ns.global_env_vars))
+    if ctx_name:
+        vars_local[f"_r_{ctx_name}"] = dump_raw
+        vars_local[ctx_name] = dump_raw
+    if gh_dump is not None:
+        gh_dump.append(dump_raw)
 
-    # ── Child contexts (‑X) ─────────────────────────────────────────
-    for bfile in ns.batch_directives or []:
-        if bfile.startswith("__ctx:"):
-            sub_tokens = ["-O", bfile.split(":", 1)[1]]
-        else:
-            dpath = Path(bfile)
-            if not dpath.is_absolute():
-                dpath = workspace / dpath
-            if not dpath.exists():
-                _fatal(f"batch file {dpath} not found")
-            sub_tokens = _parse_directive_file(dpath)
+    _refresh_env_values(vars_local)  # after concat
 
-        sub_tokens = _expand_tokens(sub_tokens, local_vars)
-        child_ns = _build_parser().parse_args(sub_tokens)
-        _post_parse(child_ns)
-
-        effective_ns = _merge_namespaces(ns, child_ns)
-
-        child_seen_files = (
-            seen_files if (seen_files is not None and effective_ns.template is None)
-            else None
-        )
-
-        child_vars, child_dump = _execute(
-            effective_ns,
+    # ── CHILD CONTEXTS ----------------------------------------------------
+    for child in node.children:
+        child_vars, _ = _execute_node(
+            child,
+            ns_effective,
             level=level + 1,
             parent_root=root,
             parent_workspace=workspace,
-            inherited_vars=local_vars,
-            inherited_seeds=ns.ai_seeds or inherited_seeds,
-            seen_files=child_seen_files,
+            inherited_vars=vars_local,
+            gh_dump=gh_dump,
         )
-        local_vars.update(child_vars)
-        if child_dump:
-            dumps.append(child_dump)
+        vars_local.update(child_vars)
 
-    consolidated_dump = "".join(dumps)
+    _refresh_env_values(vars_local)  # after children
 
-    # ── Template rendering ─────────────────────────────────────────
-    if ns.template:
-        tpl_path = _resolve_template(workspace, root, ns.template)
+    # ── TEMPLATE ----------------------------------------------------------
+    rendered = dump_raw
+    if ns_effective.template:
+        tpl_path = _resolve_path(workspace, ns_effective.template)
         if not tpl_path.exists():
             _fatal(f"template {tpl_path} not found")
         tpl_text = tpl_path.read_text(encoding="utf-8")
-        rendered = _interpolate(tpl_text, {**local_vars, "dump_data": consolidated_dump})
-    else:
-        rendered = consolidated_dump
+        rendered = _interpolate(
+            tpl_text, {**vars_local, "ghconcat_dump": "".join(gh_dump or [])}
+        )
 
-    # Alias update after template rendering
-    if ns.alias:
-        local_vars[ns.alias] = rendered
+    if ctx_name:
+        vars_local[f"_t_{ctx_name}"] = rendered
+        vars_local[ctx_name] = rendered
 
-    # ── Output & AI processing ──────────────────────────────────────
-    final_output = rendered
+    _refresh_env_values(vars_local)  # after template
+
+    # ── AI ----------------------------------------------------------------
+    final_out = rendered
     out_path: Optional[Path] = None
-    if ns.output and ns.output.lower() != TOK_NONE:
-        out_path = _resolve_path(workspace, ns.output)
-    elif ns.ai:
-        temp_fd, temp_name = tempfile.mkstemp(dir=workspace, suffix=".ai.txt")
-        os.close(temp_fd)
-        out_path = Path(temp_name)
+    if ns_effective.output and ns_effective.output.lower() != TOK_NONE:
+        out_path = _resolve_path(workspace, ns_effective.output)
 
-    if ns.ai:
+    if ns_effective.ai:
+        if out_path is None:
+            tf = tempfile.NamedTemporaryFile(
+                delete=False, dir=workspace, suffix=".ai.txt"
+            )
+            tf.close()
+            out_path = Path(tf.name)
+
         sys_prompt = ""
-        if ns.ai_system_prompt and ns.ai_system_prompt.lower() != TOK_NONE:
-            spath = _resolve_path(workspace, ns.ai_system_prompt)
+        if (
+                ns_effective.ai_system_prompt
+                and ns_effective.ai_system_prompt.lower() != TOK_NONE
+        ):
+            spath = _resolve_path(workspace, ns_effective.ai_system_prompt)
             if not spath.exists():
                 _fatal(f"system prompt {spath} not found")
-            sys_prompt_raw = spath.read_text(encoding="utf-8")
-            sys_prompt = _interpolate(sys_prompt_raw, local_vars)
+            sys_prompt = _interpolate(spath.read_text(encoding="utf-8"), vars_local)
 
-        seeds_path = None
-        if ns.ai_seeds and ns.ai_seeds.lower() != TOK_NONE:
-            seeds_path = _resolve_path(workspace, ns.ai_seeds)
+        seeds = None
+        if ns_effective.ai_seeds and ns_effective.ai_seeds.lower() != TOK_NONE:
+            seeds = _resolve_path(workspace, ns_effective.ai_seeds)
 
-        _call_openai(
+        # Dynamic call – eases unittest.mock patching
+        getattr(sys.modules["ghconcat"], "_call_openai")(
             rendered,
             out_path,
-            ns.ai_model,
-            sys_prompt,
-            temperature=ns.temperature,
-            top_p=ns.top_p,
-            presence_penalty=ns.presence_penalty,
-            frequency_penalty=ns.frequency_penalty,
-            seeds_path=seeds_path or (Path(inherited_seeds) if inherited_seeds else None),
+            model=ns_effective.ai_model,
+            system_prompt=sys_prompt,
+            temperature=ns_effective.ai_temperature,
+            top_p=ns_effective.ai_top_p,
+            presence_pen=ns_effective.ai_presence_penalty,
+            freq_pen=ns_effective.ai_frequency_penalty,
+            seeds_path=seeds,
         )
-        final_output = out_path.read_text(encoding="utf-8")
-    elif out_path:
+        final_out = out_path.read_text(encoding="utf-8")
+
+    if ctx_name:
+        vars_local[f"_ia_{ctx_name}"] = final_out
+        vars_local[ctx_name] = final_out
+
+    _refresh_env_values(vars_local)  # after AI
+
+    # ── OUTPUT ------------------------------------------------------------
+    if out_path and not ns_effective.ai:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(rendered, encoding="utf-8")
+        out_path.write_text(final_out, encoding="utf-8")
         print(f"✔ Output written → {out_path}")
 
-    # Alias update after AI
-    if ns.alias:
-        local_vars[ns.alias] = final_output
+    # Root‑level synthetic output (if nothing else captured it)
+    if level == 0 and final_out == "" and gh_dump:
+        final_out = "".join(gh_dump)
 
-    if ns.ai and not ns.output and out_path and out_path.exists():
-        out_path.unlink(missing_ok=True)
+    if level == 0 and gh_dump is not None:
+        vars_local["ghconcat_dump"] = "".join(gh_dump)
 
-    return local_vars, final_output
+    return vars_local, final_out
 
 
-# ───────────────────── Self‑upgrade helper ─────────────────────
+# ──────────────────────────  Self‑upgrade helper  ───────────────────────────
 def _perform_upgrade() -> None:  # pragma: no cover
+    """Pull latest version from GAHEOS/ghconcat and install into ~/.bin."""
     import stat
 
     tmp = Path(tempfile.mkdtemp(prefix="ghconcat_up_"))
     dest = Path.home() / ".bin" / "ghconcat"
-    repo = "git@github.com:GAHEOS/ghconcat.git"
+    repo = "https://github.com/GAHEOS/ghconcat.git"
 
     try:
         subprocess.check_call(
@@ -997,60 +953,85 @@ def _perform_upgrade() -> None:  # pragma: no cover
         shutil.copy2(src, dest)
         dest.chmod(dest.stat().st_mode | stat.S_IXUSR)
         print(f"✔ Updated → {dest}")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         _fatal(f"Upgrade failed: {exc}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     sys.exit(0)
 
 
+# ────────────────────────────  Public API  ──────────────────────────────────
 class GhConcat:
     """
-    Programmatic runner used by external callers and the test‑suite.
+    Programmatic entry‑point.
+
+    * When an explicit «‑o» is present the file is written **and** also
+      returned as a *str* for convenience.
+    * Otherwise the in‑memory dump is returned.
     """
 
     @staticmethod
     def run(argv: Sequence[str]) -> str:
         """
-        Execute *ghconcat* with *argv* and return the resulting text.
+        Execute ghconcat over *argv* and return the concatenation result.
 
-        • When an explicit «‑o» is present, the method reads that file.
-        • Otherwise it returns the consolidated dump produced in‑memory.
+        Each «‑x FILE» starts a completely isolated directive tree.
         """
-        ns = _parse_cli(argv)
+        global _SEEN_FILES
+        _SEEN_FILES = set()  # full reset per public call
 
-        if ns.upgrade:
-            import importlib
-            root_pkg = importlib.import_module("ghconcat")
-            getattr(
-                root_pkg, "_perform_upgrade",
-                getattr(sys.modules[__name__], "_perform_upgrade"),
-            )()
-            raise SystemExit(0)
+        # ── split by “‑x” -------------------------------------------------
+        units: List[Tuple[Optional[Path], List[str]]] = []
+        cli_remainder: List[str] = []
 
-        _, dump = _execute(ns)
+        it = iter(argv)
+        for tok in it:
+            if tok in ("-x", "--directives"):
+                try:
+                    fpath = Path(next(it))
+                except StopIteration:
+                    _fatal("missing FILE after -x/--directives")
+                if not fpath.exists():
+                    _fatal(f"directive file {fpath} not found")
+                units.append((fpath, cli_remainder))
+                cli_remainder = []
+            else:
+                cli_remainder.append(tok)
 
-        if ns.output and ns.output.lower() != TOK_NONE:
-            ws_root = _resolve_workspace(
-                _resolve_path(Path.cwd(), ns.workdir or "."),
-                ns.workspace,
-            )
-            out_path = _resolve_path(ws_root, ns.output)
-            try:
-                return out_path.read_text(encoding="utf-8")
-            except FileNotFoundError:
-                return ""
-        return dump
+        if not units:
+            units.append((None, cli_remainder))
+        elif cli_remainder:
+            units[-1] = (units[-1][0], units[-1][1] + cli_remainder)
+
+        # ── execute each unit --------------------------------------------
+        outputs: List[str] = []
+        for directive_path, extra_cli in units:
+            _SEEN_FILES.clear()  # dedup scope per unit
+
+            if directive_path:
+                root = _parse_directive_file(directive_path)
+                root.tokens.extend(extra_cli)
+            else:
+                root = DirNode()
+                root.tokens.extend(extra_cli)
+
+            # Dynamic call – eases unittest patch
+            if "--upgrade" in root.tokens:
+                getattr(sys.modules["ghconcat"], "_perform_upgrade")()
+
+            _, dump = _execute_node(root, None)
+            outputs.append(dump)
+
+        return "".join(outputs)
 
 
-# ───────────────────────── CLI entry‑point ─────────────────────────
+# ────────────────────────────  CLI main()  ──────────────────────────────────
 def main() -> None:  # pragma: no cover
+    """CLI dispatcher used by the real `ghconcat` executable."""
     try:
-        ns = _parse_cli(sys.argv[1:])
-        if ns.upgrade:
-            _perform_upgrade()
-        else:
-            _execute(ns)
+        result = GhConcat.run(sys.argv[1:])
+        if result and not sys.stdout.isatty():
+            sys.stdout.write(result)
     except KeyboardInterrupt:
         _fatal("Interrupted by user.", 130)
     except BrokenPipeError:
@@ -1063,9 +1044,3 @@ def main() -> None:  # pragma: no cover
 
 if __name__ == "__main__":  # pragma: no cover
     main()
-
-# Re‑export helpers when imported as a module
-pkg = sys.modules.get("ghconcat")
-if pkg is not None and pkg is not sys.modules[__name__]:
-    pkg._call_openai = _call_openai
-    pkg._perform_upgrade = _perform_upgrade

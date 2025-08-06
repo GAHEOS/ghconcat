@@ -1,0 +1,3 @@
+[js]
+-h -s .js -a src/module/charlie.js
+-n 1 -N 2

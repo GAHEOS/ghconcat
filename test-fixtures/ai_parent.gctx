@@ -1,0 +1,8 @@
+--ai-model gpt-4o
+
+[one]
+--ai
+-s .py -a src/module/alpha.py
+
+[two]
+-s .js -a src/module/charlie.js

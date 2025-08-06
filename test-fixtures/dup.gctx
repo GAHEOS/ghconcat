@@ -1,0 +1,10 @@
+
+            -h
+            -s .py
+
+            [one]
+            -a src/module/alpha.py
+
+            [two]
+            -a src/module/alpha.py
+        
