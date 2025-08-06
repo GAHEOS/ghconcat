@@ -403,76 +403,82 @@ ghconcat -x academic_pipeline.gctx -O
 
 # Global settings ----------------------------------------------------------------
 -w .                                   # project root holding local notes/
--W workspace                            # keep prompts + outputs separate
+-W workspace                         # keep prompts + outputs separate
 -E topic="Quantum Computing and Photonics"  # Visible in *all* templates
 
 # -------------------------------------------------------------------------------
 # 0 · Gather raw corpus  →  sources                                            //
 # -------------------------------------------------------------------------------
 [sources]
-// Local markdown notes
--a notes/
-
 // Two open‑access papers (HTML render)
 -F https://arxiv.org/abs/2303.11366     # Integrated Photonics for Quantum Computing
 -F https://arxiv.org/abs/2210.10255     # Boson sampling in the noisy intermediate scale
+-d 0
 
--s .md -s .html -C -i -u markdown -h     # clean & wrap
--o sources.md                            # expose as {sources}
+-K                                      # clean text (remove html tags, scripts, etc)
+-s .html -C -i -u web-research -h       # clean & wrap
+-o sources.md                           # expose as {sources}
+
+[notes]
+-a notes/
+-s .md -u note -h                       # clean & wrap
+-o notes.md                             # expose as {sources}
 
 # -------------------------------------------------------------------------------
 # 1 · Junior researcher draft  →  junior                                        //
 # -------------------------------------------------------------------------------
 [junior]
 -a workspace/sources.md                  # feed the corpus
+-a workspace/notes.md                    # feed the corpus
 -t prompts/junior.md                     # persona prompt (see below)
 --ai --ai-model o3                       # cheap deterministic model
--o junior.md
+-o junior.out.md
 
 # -------------------------------------------------------------------------------
 # 2 · Senior researcher pass  →  senior                                         //
 # -------------------------------------------------------------------------------
 [senior]
--a workspace/junior.md
+-a workspace/junior.out.md
 -t prompts/senior.md
 --ai --ai-model gpt-4o
--o senior.md
+-o senior.out.md
+-E to_critic=$senior
 
 # -------------------------------------------------------------------------------
 # 3 · First academic critique  →  critic1                                       //
 # -------------------------------------------------------------------------------
 [critic1]
--a workspace/senior.md
+-a workspace/senior.out.md
 -t prompts/critic.md
 --ai --ai-model gpt-4o
--o critic1.md
+-o critic1.out.md
 
 # -------------------------------------------------------------------------------
 # 4 · Language & style polish  →  redraft                                       //
 # -------------------------------------------------------------------------------
 [redraft]
--a workspace/critic1.md
+-a workspace/critic1.out.md
 -t prompts/editor.md
 --ai --ai-model gpt-4o
--o redraft.md
+-o redraft.out.md
 
 # -------------------------------------------------------------------------------
 # 5 · Final critique after polish  →  critic2                                   //
 # -------------------------------------------------------------------------------
 [critic2]
--a workspace/redraft.md
+-a workspace/redraft.out.md
 -t prompts/critic.md
 --ai --ai-model gpt-4o
--o critic2.md
+-o critic2.out.md
+-E to_critic=$redraft
 
 # -------------------------------------------------------------------------------
 # 6 · Bundle for humans  →  final                                               //
 # -------------------------------------------------------------------------------
 [final]
--a workspace/critic2.md
+-a workspace/critic2.out.md
 -h -R                                     # add absolute path banner for traceability
 -o final_report.md
--O                                        # duplicate to STDOUT
 ```
 
 #### Prompt files
@@ -492,13 +498,12 @@ You are a **junior research associate** preparing an initial literature review o
 
 ### Task
 
-1. Read the raw corpus delimited by `<<<` / `>>>`.
+1. Read the raw corpus located in  ```note``` and ```web-research``` markdown code blocks.
 2. Extract **key research questions**, **methodologies**, and **major findings**.
 3. Output a *numbered outline* (max 1 000 words).
 
-=====
+{notes}
 {sources}
-=====
 ```
 
 ##### prompts/senior.md
@@ -518,9 +523,14 @@ Improve the draft below by:
 
 Return a revised outline with inline comments where changes were made.
 
-=====
+### Web-research background 
+{source}
+
+### Junior Notes
+{notes}
+
+### Draft Outline
 {junior}
-=====
 ```
 
 ##### prompts/critic.md
@@ -538,9 +548,7 @@ You serve on a *blind peer‑review committee*.
 
 Document under review:
 
-=====
-{senior}{{redraft}}  <!-- the template receives whichever context is fed -->
-=====
+{to_critic}
 ```
 
 ##### prompts/editor.md
@@ -555,11 +563,12 @@ Professional **science copy‑editor**.
 Rewrite the document for clarity, concision and formal academic tone.  
 Fix passive‑voice overuse, tighten sentences, and ensure IEEE reference style.
 
-Source (critically reviewed):
-
-=====
+## Critique Summary
 {critic1}
-=====
+
+## Revised Document
+Source (critically reviewed):
+{senior}
 ```
 
 ##### notes/note_lab_log_2025-06-03.md

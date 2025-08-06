@@ -10,6 +10,4 @@ You serve on a *blind peer‑review committee*.
 
 Document under review:
 
-=====
-{senior}{{redraft}}  <!-- the template receives whichever context is fed -->
-=====
+{to_critic}

@@ -38,8 +38,17 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import logging
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger("ghconcat")
+try:
+    from lxml import etree as _ET  # type: ignore
+
+    _ET_PARSER = _ET.HTMLParser(recover=True)
+except ModuleNotFoundError:  # lxml no instalado
+    try:
+        import xml.etree.ElementTree as _ET  # type: ignore
+
+        _ET_PARSER = None  # ElementTree no necesita parser
+    except ModuleNotFoundError:
+        _ET = None  # sin ningún etree
 
 # Optional OpenAI import (lazy)
 try:
@@ -52,7 +61,11 @@ except ModuleNotFoundError:  # pragma: no cover
     class OpenAIError(Exception):  # type: ignore
         """Raised when the OpenAI SDK is unavailable."""
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger("ghconcat")
+
 # ───────────────────────────────  Constants  ────────────────────────────────
+_TAG_RE = re.compile(r"<[^>]+>")
 _CLI_MODE: bool = False
 HEADER_DELIM: str = "===== "
 DEFAULT_OPENAI_MODEL: str = "o3"
@@ -411,21 +424,26 @@ def _inject_positional_add_paths(tokens: List[str]) -> List[str]:
 # ───────────────────────  Directive‑file parsing  ───────────────────────────
 def _tokenize_directive_line(raw: str) -> List[str]:
     """
-    Split *raw* (a single line from the directive file) into CLI-style tokens,
-    honouring `//`, `#` and `;` as inline-comment delimiters **unless** the
-    sequence is part of a URI scheme (e.g. `https://`).
+    Split *raw* (a single line from a directive file) into CLI-style tokens,
+    honouring `//`, `#` and `;` as inline-comment delimiters **except** when
+    the `//` belongs to a URI scheme such as `https://`, `s3://`, `file://`,
+    etc.
 
-    If the very first token does **not** start with “-”, the whole line is
-    treated as a list of paths and expanded into multiple “-a PATH”.
+    - Bare tokens whose first char is *not* “-” are implicitly expanded to
+      “-a <token>” for convenience.
     """
+
     def _strip_inline_comments(line: str) -> str:
         in_quote: str | None = None
         i = 0
         n = len(line)
+
         while i < n:
             ch = line[i]
 
-            # toggle simple quoting
+            # ──────────────────────────────────────────────────────
+            #  Handle simple quoting to ignore markers inside them
+            # ──────────────────────────────────────────────────────
             if ch in {"'", '"'}:
                 if in_quote is None:
                     in_quote = ch
@@ -434,30 +452,27 @@ def _tokenize_directive_line(raw: str) -> List[str]:
                 i += 1
                 continue
 
-            # check comment markers only when not quoted
+            # ──────────────────────────────────────────────────────
+            #  Comment markers are recognised **only** when unquoted
+            # ──────────────────────────────────────────────────────
             if in_quote is None:
-                # ------------------------------------------------------------------
-                # 1) "//" comment  (but ignore   \w+://   such as https://)
-                # ------------------------------------------------------------------
+                # 1) “//”  → comment  (but NOT when preceded by ':')
+                #    i.e. the triple “://” inside a URI is *not* a comment.
                 if ch == "/" and i + 1 < n and line[i + 1] == "/":
-                    # look-back a reasonable window for "scheme://"
-                    head = line[:i].rstrip()
-                    if not _SCHEME_RE.search(head[-12:]):           # cheap guard
+                    if i == 0 or line[i - 1] != ":":  # real comment
                         return line[:i]
-                    # else: it's part of URI → skip as data
-                # ------------------------------------------------------------------
-                # 2) "#" comment
-                # ------------------------------------------------------------------
-                if ch == "#":
+                    # else: part of   scheme://   → keep going
+
+                # 2) “#”  → comment   (YAML / shell style)
+                elif ch == "#":
                     return line[:i]
-                # ------------------------------------------------------------------
-                # 3) ";" comment
-                # ------------------------------------------------------------------
-                if ch == ";":
+
+                # 3) “;”  → comment   (Makefile / SQL style)
+                elif ch == ";":
                     return line[:i]
 
             i += 1
-        return line
+        return line  # no comment detected
 
     stripped = _strip_inline_comments(raw).strip()
     if not stripped:
@@ -467,12 +482,38 @@ def _tokenize_directive_line(raw: str) -> List[str]:
     if not parts:
         return []
 
+    # Auto-expand positional paths → “-a PATH”
     if not parts[0].startswith("-"):
         tokens: List[str] = []
         for pth in parts:
             tokens.extend(["-a", pth])
         return tokens
+
     return parts
+
+
+def _html_to_text(src: str) -> str:
+    """
+    Devuelve una versión en **texto plano** de *src* (documento o fragmento HTML).
+
+    - **lxml.etree** : `etree.fromstring(..., parser)`  → `itertext()`.
+    - **xml.etree.ElementTree** : igual pero sin parser.
+    - **Fallback**              : quita todas las etiquetas con regex y colapsa espacios.
+    """
+    if _ET is None:  # 3) último recurso
+        return re.sub(r"[ \t]+\n", "\n",
+                      _TAG_RE.sub(" ", src)).strip()
+
+    try:  # 1) lxml  o  2) ElementTree
+        root = (_ET.fromstring(src, parser=_ET_PARSER)  # type: ignore[arg-type]
+                if _ET_PARSER is not None
+                else _ET.fromstring(src))
+        # Únete preservando saltos razonables
+        return "\n".join(t for t in root.itertext() if t.strip())
+    except Exception:
+        # Si el parser falla (HTML muy roto) → fallback regex
+        return re.sub(r"[ \t]+\n", "\n",
+                      _TAG_RE.sub(" ", src)).strip()
 
 
 def _parse_directive_file(path: Path) -> DirNode:
@@ -759,6 +800,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "-B", "--keep-blank", dest="blank_flags",
         action="append_const", const="keep",
         help="Preserve blank lines (overrides an inherited ‑b).",
+    )
+    g_cln.add_argument(
+        "-K", "--textify-html", action="store_true", dest="strip_html",
+        help="Convert every *.html* file to plain-text (tags removed) before concatenation.",
     )
 
     # ── template & output ─────────────────────────────────────────────────────
@@ -1100,6 +1145,11 @@ def _concat_files(
         with fp.open("r", encoding="utf-8", errors="ignore") as fh:
             raw_lines = list(fh)
 
+        if ns.strip_html and fp.suffix.lower() == ".html":
+            plain = _html_to_text("".join(raw_lines))
+            raw_lines = [ln + "\n" for ln in plain.splitlines()]
+            ext = ""
+
         body_lines = _clean(
             _slice(raw_lines, ns.first_line, ns.total_lines, ns.keep_header),
             ext,
@@ -1327,39 +1377,125 @@ def _scrape_urls(
         same_host_only: bool = True,
 ) -> List[Path]:
     """
-    Recursively crawl *seeds* (depth-limited) and download linked resources
-    that satisfy suffix / exclusion rules.  Returns cached Path objects.
+    Rastreo BFS con filtrado estricto usando listas de extensiones
+    “well-known” (WKE) + reglas -s / -S.
 
-    • Logs every successful download: «✔ scraped URL (d=depth) → /path/file».
-    • Links without extension are treated as .html for filtering.
-    • scheme+netloc must match the origin when *same_host_only* is True.
+    ▸ Si hay -s / -S:
+        · Una URL con WKE no listada por -s se descarta.
+        · Una URL con WKE en -S (y no en -s) se descarta.
+    ▸ Extensiones no WKE:
+        · Se aceptan sólo si están en -s; de lo contrario se
+          descargan para inspección y, si son texto, se tratan
+          como .html (o el fallback MIME).
+    ▸ Binarios se eliminan tras la descarga si se colaron.
     """
-    import urllib.request, urllib.parse, mimetypes, html, re, sys
+    import urllib.request, urllib.parse, mimetypes, html, re
     from collections import deque
 
-    _EXT_FALLBACK = {
-        "text/html": ".html", "application/json": ".json",
-        "text/css": ".css", "text/plain": ".txt", "text/xml": ".xml",
+    # ────────────────────────── Catálogo WKE ──────────────────────────
+    # Texto / marcado / código
+    TEXT_EXT = {
+        ".html", ".htm", ".xhtml",
+        ".md", ".markdown",
+        ".txt", ".text",
+        ".css", ".scss", ".less",
+        ".js", ".mjs", ".ts", ".tsx", ".jsx",
+        ".json", ".jsonc", ".yaml", ".yml",
+        ".xml", ".svg",
+        ".csv", ".tsv",
+        ".py", ".rb", ".php", ".pl", ".pm",
+        ".go", ".rs", ".java", ".c", ".cpp", ".cc", ".h", ".hpp",
+        ".sh", ".bash", ".zsh", ".ps1",
+        ".r", ".lua",
     }
+
+    # Binarios “web-ish” que solemos querer descartar salvo que el
+    # usuario los pida explícitamente con -s
+    BINARY_EXT = {
+        # imágenes
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tiff", ".avif",
+        # vídeo
+        ".mp4", ".m4v", ".mov", ".webm", ".ogv", ".flv",
+        # audio
+        ".mp3", ".ogg", ".oga", ".wav", ".flac",
+        # fuentes
+        ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        # documentos
+        ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+        # compresión / binarios genéricos
+        ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z",
+    }
+
+    WELL_KNOWN_EXT = TEXT_EXT | BINARY_EXT
+
+    # Fallback cuando la URL carece de extensión válida
+    _EXT_FALLBACK = {
+        "text/html": ".html",
+        "application/json": ".json",
+        "application/javascript": ".js",
+        "text/css": ".css",
+        "text/plain": ".txt",
+        "text/xml": ".xml",
+    }
+
+    include_set = {s if s.startswith(".") else f".{s}" for s in suffixes}
+    exclude_set = {s if s.startswith(".") else f".{s}" for s in exclude_suf} - include_set
+
     cache_dir = cache_root / ".ghconcat_urlcache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     href_re = re.compile(r'href=["\']?([^"\' >]+)', re.I)
+    ext_re = re.compile(r"\.[A-Za-z0-9_-]{1,8}$")
     ua_hdr = {"User-Agent": "ghconcat/2.0 (+https://gaheos.com)"}
 
-    visited: set[str] = set()
-    queue = deque([(u, 0) for u in seeds])
-    out_paths: List[Path] = []
+    # ─────────────── utilidades ───────────────
+    def _extract_ext(url: str) -> str:
+        m = ext_re.search(urllib.parse.urlparse(url).path)
+        return m.group(0).lower() if m else ""
 
-    def _download(url: str, idx: int, depth: int) -> Optional[Tuple[Path, str, bytes]]:
+    def _is_binary_mime(ctype: str) -> bool:
+        if ctype.startswith("text/") or ctype.endswith(("+xml", "+json", "+html")):
+            return False
+        if ctype in ("application/json", "application/javascript", "application/xml"):
+            return False
+        return True
+
+    def _skip_pre_download(ext: str) -> bool:
+        """Decide si una URL debe descartarse sin descargar."""
+        # 1) Extensión reconocida
+        if ext in WELL_KNOWN_EXT:
+            if include_set and ext not in include_set:
+                return True  # WKE no pedida
+            if ext in exclude_set:
+                return True  # WKE excluida
+            return False  # pasa filtros
+        # 2) Extensión rara / inexistente
+        if ext in exclude_set:
+            return True
+        if include_set and ext not in include_set:
+            # no pedida explícitamente, pero permitimos descargar
+            # para inspección (quizá sea html sin ext)
+            return False
+        return False  # se descarga para inspección
+
+    def _download(url: str, idx: int, depth: int):
         try:
             req = urllib.request.Request(url, headers=ua_hdr)
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = resp.read()
                 ctype = resp.headers.get("Content-Type", "").split(";", 1)[0].strip()
+
             name = Path(urllib.parse.urlparse(url).path).name or f"remote_{idx}"
-            if "." not in name:
-                name += _EXT_FALLBACK.get(ctype) or mimetypes.guess_extension(ctype) or ".html"
+            ext = _extract_ext(name)
+
+            # Ajustar nombre si no termina en una extensión coherente
+            if not ext or ext not in WELL_KNOWN_EXT:
+                ext = include_set.intersection({ext}).pop() if ext in include_set else ""
+                if not ext:
+                    ext = _EXT_FALLBACK.get(ctype) or ".html"
+                if not name.lower().endswith(ext):
+                    name += ext
+
             dst = cache_dir / f"scr_{idx}_{name}"
             dst.write_bytes(data)
             logger.info(f"✔ scraped {url} (d={depth}) → {dst}")
@@ -1368,34 +1504,49 @@ def _scrape_urls(
             logger.error(f"⚠  could not scrape {url}: {exc}")
             return None
 
+    # ─────────────── BFS ───────────────
+    visited: set[str] = set()
+    queue = deque([(u, 0) for u in seeds])
+    out_paths: List[Path] = []
+
     while queue:
         url, depth = queue.popleft()
         if url in visited or depth > max_depth:
             continue
         visited.add(url)
 
+        ext = _extract_ext(url)
+        if _skip_pre_download(ext):
+            continue
+
         dl = _download(url, len(visited), depth)
         if dl is None:
             continue
         dst, ctype, body = dl
 
-        ext = dst.suffix.lower() or ".html"
-        if suffixes and not any(ext.endswith(s) for s in suffixes):
+        # Verificación binaria posterior (p.ej. ext rara + MIME binario)
+        if _is_binary_mime(ctype) and dst.suffix.lower() not in include_set:
+            try:
+                dst.unlink(missing_ok=True)
+            except Exception:
+                pass
             continue
-        if any(ext.endswith(s) for s in set(exclude_suf) - set(suffixes)):
-            continue
+
         out_paths.append(dst)
 
+        # Expandir enlaces HTML
         if ctype.startswith("text/html") and depth < max_depth:
             try:
-                txt = body.decode("utf-8", "ignore")
-                for link in href_re.findall(txt):
+                html_txt = body.decode("utf-8", "ignore")
+                for link in href_re.findall(html_txt):
                     abs_url = urllib.parse.urljoin(url, html.unescape(link))
-                    if same_host_only:
-                        if urllib.parse.urlparse(abs_url)[:2] != urllib.parse.urlparse(url)[:2]:
-                            continue
-                    if abs_url not in visited:
-                        queue.append((abs_url, depth + 1))
+                    if same_host_only and urllib.parse.urlparse(abs_url)[:2] != urllib.parse.urlparse(url)[:2]:
+                        continue
+                    if abs_url in visited:
+                        continue
+                    if _skip_pre_download(_extract_ext(abs_url)):
+                        continue
+                    queue.append((abs_url, depth + 1))
             except Exception:
                 pass
 
@@ -1541,17 +1692,7 @@ def _execute_node(
             )
 
         # 4.4 Unión + filtro post-descarga
-        files = [
-            *local_files,
-            *[
-                fp for fp in (*remote_files, *scraped_files)
-                if (
-                        (not suffixes or any(fp.name.endswith(s) for s in suffixes))
-                        and not any(fp.name.endswith(s)
-                                    for s in set(exclude_suf) - set(suffixes))
-                )
-            ],
-        ]
+        files = [*local_files, *remote_files, *scraped_files]
 
         # 4.5 Concatenación + wrapping opcional
         if files:
@@ -1581,6 +1722,7 @@ def _execute_node(
 
     # ── 6. Procesar hijos recursivamente ───────────────────────────────────
     for child in node.children:
+        # Cada hermano recibe TODA la info acumulada hasta el momento
         child_vars, _ = _execute_node(
             child,
             ns_effective,
@@ -1591,6 +1733,7 @@ def _execute_node(
             gh_dump=gh_dump,
         )
         vars_local.update(child_vars)
+        inherited_for_children.update(child_vars)
 
     _refresh_env_values(vars_local)
 

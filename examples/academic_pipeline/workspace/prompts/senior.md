@@ -12,6 +12,11 @@ Improve the draft below by:
 
 Return a revised outline with inline comments where changes were made.
 
-=====
+### Web-research background 
+{source}
+
+### Junior Notes
+{notes}
+
+### Draft Outline
 {junior}
-=====
