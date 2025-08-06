@@ -895,7 +895,12 @@ def _execute_node(
             seeds = _resolve_path(workspace, ns_effective.ai_seeds)
 
         # Dynamic call – eases unittest.mock patching
-        getattr(sys.modules["ghconcat"], "_call_openai")(
+        if "ghconcat" in sys.modules:
+            _call_openai_safe = getattr(sys.modules["ghconcat"], "_call_openai")
+        else:
+            _call_openai_safe = _call_openai
+
+        _call_openai_safe(
             rendered,
             out_path,
             model=ns_effective.ai_model,
@@ -937,7 +942,7 @@ def _perform_upgrade() -> None:  # pragma: no cover
 
     tmp = Path(tempfile.mkdtemp(prefix="ghconcat_up_"))
     dest = Path.home() / ".bin" / "ghconcat"
-    repo = "https://github.com/GAHEOS/ghconcat.git"
+    repo = "git@github.com:GAHEOS/ghconcat.git"
 
     try:
         subprocess.check_call(
@@ -1014,7 +1019,11 @@ class GhConcat:
 
             # Dynamic call – eases unittest patch
             if "--upgrade" in root.tokens:
-                getattr(sys.modules["ghconcat"], "_perform_upgrade")()
+                if "ghconcat" in sys.modules:
+                    _perform_upgrade_safe = getattr(sys.modules["ghconcat"], "_perform_upgrade")
+                else:
+                    _perform_upgrade_safe = _perform_upgrade
+                _perform_upgrade_safe()
 
             _, dump = _execute_node(root, None)
             outputs.append(dump)
