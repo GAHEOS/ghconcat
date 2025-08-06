@@ -1017,11 +1017,6 @@ def _concat_files(
             parts.append(f"{HEADER_DELIM}{hdr_path} {HEADER_DELIM}\n")
             _SEEN_FILES.add(hdr_path)
 
-        # Lightweight comment header (if “‑h” not requested)
-        if ns.skip_headers:
-            prefix = comment_prefix.get(ext, "# ")
-            suffix = " -->\n" if prefix.startswith("<!--") else "\n"
-            parts.append(f"{prefix}{hdr_path}{suffix}")
 
         body = "".join(body_lines)
         parts.append(body)

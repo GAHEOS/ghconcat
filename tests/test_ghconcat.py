@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Full functional test‑suite for *ghconcat* (spec v2 – 2025‑08‑05).
+Full functional test‑suite for *ghconcat* (spec v2 – 2025‑08‑05).
 
-• Covers **100 %** of public CLI flags + precedence rules.
+• Covers **100%** of public CLI flags + precedence rules.
 • Exercises root‑level execution, multi‑context directive files, multi‑«‑x»
   sequences, environment inheritance, AI integration (offline mocks) and the
   self‑upgrade shortcut.
-• No legacy flags «‑X/‑O» are used; everything follows GAHEOS v2 semantics.
+• No legacy flags «‑X/‑O» are used; everything follows GAHEOS v2 semantics.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ TOOLS_DIR = Path(__file__).resolve().parent / "tools"
 FIXTURES = Path(__file__).resolve().parents[1] / "test-fixtures"
 BUILD_SCRIPT = TOOLS_DIR / "build_fixtures.py"
 os.environ["GHCONCAT_DISABLE_AI"] = "1"
-# Build the tree once at import‑time — it is fast (< 0.2 s)
+# Build the tree once at import‑time — it is fast (< 0.2s)
 subprocess.check_call([os.sys.executable, str(BUILD_SCRIPT)], stdout=subprocess.DEVNULL)
 
 
@@ -344,11 +344,11 @@ class MultiXTests(GhConcatBaseTest):
         self.assertInDump("omega.xml", dump)
 
     def test_cli_flags_do_not_leak(self) -> None:
-        # First ‑x sets ‑s .js, second ‑x inherits nothing
+        # First ‑x sets ‑s .js, second ‑x inherits nothing
         ctx1 = FIXTURES / "x_js.gctx"
-        ctx1.write_text("-s .js -a src/module", encoding="utf-8")
+        ctx1.write_text("-s .js -a src/module -h", encoding="utf-8")
         ctx2 = FIXTURES / "x_py.gctx"
-        ctx2.write_text("-s .py -a src/module", encoding="utf-8")
+        ctx2.write_text("-s .py -a src/module -h", encoding="utf-8")
 
         dump = _run(["-x", str(ctx1), "-x", str(ctx2)])
         self.assertInDump("alpha.py", dump)
@@ -413,7 +413,7 @@ class HeaderDedupTests(GhConcatBaseTest):
 # --------------------------------------------------------------------------- #
 class BlankPrecedenceTests(Base):
     def test_parent_strip_child_keep(self) -> None:
-        dump = _run(["-x", "blank_ctx.gctx"])
+        dump = _run(["-x", "blank_ctx.gctx", "-h"])
         # gamma.py contiene líneas en blanco: deben conservarse por el -B del contexto
         gamma_seg = re.search(r"gamma\.py[^\n]*\n(.+)", dump, re.S)
         self.assertIsNotNone(gamma_seg)
