@@ -57,6 +57,7 @@ _CLI_MODE: bool = False
 HEADER_DELIM: str = "===== "
 DEFAULT_OPENAI_MODEL: str = "o3"
 TOK_NONE: str = "none"
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 # Pattern used to wipe any “# line 1…” when the first line must be dropped.
 _LINE1_RE: re.Pattern[str] = re.compile(r"^\s*#\s*line\s*1\d*\s*$")
@@ -410,18 +411,55 @@ def _inject_positional_add_paths(tokens: List[str]) -> List[str]:
 # ───────────────────────  Directive‑file parsing  ───────────────────────────
 def _tokenize_directive_line(raw: str) -> List[str]:
     """
-    Split *raw* (a single line from the directive file) into CLI‑style tokens,
-    honouring `//`, `#` and `;` as inline‑comment delimiters.
+    Split *raw* (a single line from the directive file) into CLI-style tokens,
+    honouring `//`, `#` and `;` as inline-comment delimiters **unless** the
+    sequence is part of a URI scheme (e.g. `https://`).
 
-    If the very first token does **not** start with “‑”, the whole line is
-    treated as a list of paths and expanded into multiple “‑a PATH”.
+    If the very first token does **not** start with “-”, the whole line is
+    treated as a list of paths and expanded into multiple “-a PATH”.
     """
-    stripped = (
-        raw.split("//", 1)[0]
-        .split("#", 1)[0]
-        .split(";", 1)[0]
-        .strip()
-    )
+    def _strip_inline_comments(line: str) -> str:
+        in_quote: str | None = None
+        i = 0
+        n = len(line)
+        while i < n:
+            ch = line[i]
+
+            # toggle simple quoting
+            if ch in {"'", '"'}:
+                if in_quote is None:
+                    in_quote = ch
+                elif in_quote == ch:
+                    in_quote = None
+                i += 1
+                continue
+
+            # check comment markers only when not quoted
+            if in_quote is None:
+                # ------------------------------------------------------------------
+                # 1) "//" comment  (but ignore   \w+://   such as https://)
+                # ------------------------------------------------------------------
+                if ch == "/" and i + 1 < n and line[i + 1] == "/":
+                    # look-back a reasonable window for "scheme://"
+                    head = line[:i].rstrip()
+                    if not _SCHEME_RE.search(head[-12:]):           # cheap guard
+                        return line[:i]
+                    # else: it's part of URI → skip as data
+                # ------------------------------------------------------------------
+                # 2) "#" comment
+                # ------------------------------------------------------------------
+                if ch == "#":
+                    return line[:i]
+                # ------------------------------------------------------------------
+                # 3) ";" comment
+                # ------------------------------------------------------------------
+                if ch == ";":
+                    return line[:i]
+
+            i += 1
+        return line
+
+    stripped = _strip_inline_comments(raw).strip()
     if not stripped:
         return []
 
