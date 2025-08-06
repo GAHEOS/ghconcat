@@ -32,7 +32,7 @@ ghconcat -s .py -s .xml -C -i -n 120 \
 ghconcat -F https://gaheos.com -s .html -l
 
 # 3 ─ Pipeline declarativo multi‑paso con contexts
-ghconcat -x conf/pipeline.gcx -o build/artifact.txt
+ghconcat -x conf/pipeline.gctx -o build/artifact.txt
 ```
 
 ---
@@ -123,7 +123,7 @@ export OPENAI_API_KEY=sk-********************************
 | Auditar un **addon Odoo** sin comentarios/imports | `ghconcat -s .py -C -i -a addons/sale_extended`                                          |
 | Dry‑run (listado relativo)                        | `ghconcat -s .py -a addons/sale_extended -l`                                             |
 | Dump `.py + .dart`, envoltura Markdown + OpenAI   | `ghconcat -s .py -s .dart -C -i -a src -u markdown --ai -t tpl/prompt.md -o ai/reply.md` |
-| Artefacto multi‑paso vía contexts                 | `ghconcat -x ci_pipeline.gcx -o build/ci_bundle.txt`                                     |
+| Artefacto multi‑paso vía contexts                 | `ghconcat -x ci_pipeline.gctx -o build/ci_bundle.txt`                                    |
 
 ---
 
@@ -216,7 +216,7 @@ ghconcat -s .js -s .dart -C -i -a lib -a web \
 <details>
 <summary><strong>11.3 Pipeline con post-proceso IA</strong></summary>
 
-```gcx
+```gctx
 # ver ejemplo completo arriba
 ```
 

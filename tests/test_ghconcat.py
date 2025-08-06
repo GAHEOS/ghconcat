@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import io
 import shutil
 import subprocess
 import tempfile
@@ -480,6 +481,7 @@ class UnicodePathTests(Base):
             "-h",
             "-s", ".js",
             "-a", "src/module/ünicode dir/file with space.js",
+            "-o", "dump_q.txt",
         ])
         self.assertInDump("ünicode dir/file with space.js", dump)
 
@@ -596,7 +598,7 @@ class RemoteURLTests(GhConcatBaseTest):
         opening <html tag (case-insensitive).  Uses suffix filter to limit to
         .html content.
         """
-        dump = _run(["-f", "https://www.gaheos.com", "-s", ".html"])
+        dump = _run(["-f", "https://www.gaheos.com", "-s", ".html", "-o", "dump_q.txt"])
         self.assertInDump("<html", dump.lower())
 
 
@@ -610,7 +612,7 @@ class ScrapeURLTests(GhConcatBaseTest):
         • More than one header banner appears, meaning at least two HTML
           resources were fetched (root + at least one linked page).
         """
-        dump = _run(["-F", "https://www.gaheos.com", "-s", ".html", "-h", "-d", "1"])
+        dump = _run(["-F", "https://www.gaheos.com", "-s", ".html", "-h", "-d", "1", "-o", "dump_q.txt"])
         self.assertInDump("<html", dump.lower())
         self.assertGreaterEqual(dump.count(HEADER_DELIM), 2,
                                 "expected multiple HTML documents in scrape")
@@ -626,10 +628,222 @@ class ScrapeURLTests(GhConcatBaseTest):
             "-s", ".html",
             "-h",
             "-d", "0",  # profundidad cero
+            "-o", "dump_q.txt",
         ])
         # Solo un encabezado esperado
         self.assertEqual(dump.count(HEADER_DELIM), 2,
                          "depth 0 should include only the seed URL")
+
+
+# --------------------------------------------------------------------------- #
+# 23. Interpolation - Escape “{{…}}”                                          #
+# --------------------------------------------------------------------------- #
+class InterpolationEscapeTests(unittest.TestCase):
+    """Unit tests for the `{…}` / `{{…}}` interpolation semantics."""
+
+    # Convenience alias to the function under test
+    _interp = staticmethod(ghconcat._interpolate)
+
+    def test_single_brace_is_interpolated(self) -> None:
+        """{var} is replaced by its mapping value."""
+        tpl = "Hello {user}"
+        out = self._interp(tpl, {"user": "Leo"})
+        self.assertEqual(out, "Hello Leo")
+
+    def test_double_brace_is_preserved(self) -> None:
+        """{{var}} is rendered as {var} without interpolation."""
+        tpl = "Hello {{user}}"
+        out = self._interp(tpl, {"user": "Leo"})
+        self.assertEqual(out, "Hello {user}")
+
+    def test_mixed_placeholders(self) -> None:
+        """
+        Interpolates single-brace placeholders while preserving
+        double-brace literals in the same string.
+        """
+        tpl = "{{skip}} {user} {{name}} {missing}"
+        out = self._interp(tpl, {"user": "Leo"})
+        self.assertEqual(out, "{skip} Leo {name} ")
+
+    def test_nested_like_sequences(self) -> None:
+        """
+        Edge-case: sequences such as '{{{var}}}' should result in '{Leo}'
+        (outer '{{' is escape, inner '{var}' gets interpolated).
+        """
+        tpl = "{{{user}}}"
+        out = self._interp(tpl, {"user": "Leo"})
+        self.assertEqual(out, "{Leo}")
+
+    def test_empty_mapping_replaces_with_empty_string(self) -> None:
+        """Missing keys in mapping resolve to an empty string (legacy behaviour)."""
+        tpl = "Status: {state}"
+        out = self._interp(tpl, {})
+        self.assertEqual(out, "Status: ")
+
+
+# --------------------------------------------------------------------------- #
+# 24. Interpolación con escape – integración completa                         #
+# --------------------------------------------------------------------------- #
+class InterpolationIntegrationTests(GhConcatBaseTest):
+    """
+    Verifica que la interpolación con llaves dobles funcione al ejecutar
+    ghconcat desde la CLI, utilizando plantillas reales y variables de
+    contexto/env.
+    """
+
+    def test_double_brace_literal_preserved(self) -> None:
+        """
+        Plantilla con {user} y {{user}}:
+        • {user}  → se interpola usando -e user=Leo.
+        • {{user}}→ se conserva y se emite como {user}.
+        """
+        tpl = FIXTURES / "tpl_escape1.tpl"
+        tpl.write_text("Val: {user} & {{user}}", encoding="utf-8")
+
+        dump = _run([
+            "-s", ".py",
+            "-a", "src/module/alpha.py",
+            "-e", "user=Leo",
+            "-t", str(tpl),
+        ])
+
+        self.assertInDump("Val: Leo & {user}", dump)
+
+    def test_mixed_context_variables(self) -> None:
+        """
+        Usa un archivo .gctx con un contexto llamado [ctx]. La plantilla mezcla:
+        • {{ctx}} – literal (no interpolar)  → debe renderizarse como {ctx}
+        • {ctx}   – placeholder real          → debe contener el cuerpo de alpha.py
+        """
+        # 1. Plantilla
+        tpl = FIXTURES / "tpl_escape2.tpl"
+        tpl.write_text("**{{ctx}}** -> {ctx}", encoding="utf-8")
+
+        # 2. Archivo de directivas con un contexto “ctx”
+        gctx = FIXTURES / "single_ctx.gctx"
+        gctx.write_text("""
+            [ctx]
+            -h
+            -a src/module/alpha.py
+            -s .py
+        """, encoding="utf-8")
+
+        # 3. Ejecutar ghconcat
+        dump = _run(["-x", str(gctx), "-t", str(tpl)])
+
+        # 4. Aserciones
+        self.assertInDump("**{ctx}**", dump)  # literal preservado
+        self.assertInDump("->", dump)  # flecha presente
+        self.assertInDump("def alpha", dump)  # contenido interpolado
+
+
+# --------------------------------------------------------------------------- #
+# 25. Rutas posicionales en CLI                                               #
+# --------------------------------------------------------------------------- #
+class PositionalAddPathTests(GhConcatBaseTest):
+    """
+    Verifica que pasar archivos y directorios como argumentos posicionales en
+    la CLI se comporte igual que usar «-a».
+    """
+
+    def test_cli_positional_paths_concatenate(self) -> None:
+        """
+        Ejecuta:
+            ghconcat -h -s .py src/module/alpha.py src/other
+        y comprueba que:
+          • Se incluyan alpha.py y beta.py (dir src/other).
+          • No aparezca charlie.js porque el filtro «-s .py» restringe a .py.
+        """
+        dump = _run([
+            "-h",
+            "-s", ".py",
+            "src/module/alpha.py",  # archivo individual
+            "src/other",  # directorio entero
+        ])
+        self.assertInDump("alpha.py", dump)
+        self.assertInDump("beta.py", dump)
+        self.assertNotInDump("charlie.js", dump)
+
+
+# --------------------------------------------------------------------------- #
+#  26. Salida estándar (-O / implícita sin -o)                                #
+# --------------------------------------------------------------------------- #
+class StdoutBehaviourTests(GhConcatBaseTest):
+    """Comprueba la lógica de STDOUT introducida por -O."""
+
+    # ---------- util ---------- #
+    def _run_capture(self, args):
+        """
+        Ejecuta ghconcat capturando stdout.
+        Devuelve (dump, stdout_str).
+        """
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            dump = _run(args)
+        return dump, buf.getvalue()
+
+    # ---------- casos raíz ---------- #
+    def test_auto_stdout_when_no_o(self) -> None:
+        """Sin -o ⇒ volcado completo directo a STDOUT."""
+        dump, stdout = self._run_capture(
+            ["-s", ".py", "-a", "src/module/alpha.py"]
+        )
+        self.assertInDump("def alpha", stdout)
+        # El dump retornado debe coincidir con lo impreso (salvo líneas de log)
+        self.assertInDump("def alpha", dump)
+
+    def test_no_stdout_with_only_o(self) -> None:
+        """Con -o pero sin -O ⇒ nada del cuerpo en STDOUT (solo posible log)."""
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "file.txt"
+            _, stdout = self._run_capture(
+                ["-s", ".py", "-a", "src/module/alpha.py", "-o", str(out)]
+            )
+            self.assertTrue(out.exists())
+            # No debe aparecer el código fuente
+            self.assertNotInDump("def alpha", stdout)
+
+    def test_stdout_duplication_with_O(self) -> None:
+        """-o + -O duplica el resultado a STDOUT además del archivo."""
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "file.txt"
+            dump, stdout = self._run_capture(
+                ["-s", ".py", "-a", "src/module/alpha.py", "-o", str(out), "-O"]
+            )
+            self.assertTrue(out.exists())
+            self.assertInDump("def alpha", stdout)
+            # El cuerpo concatenado está incluido en la salida estándar
+            self.assertInDump("def alpha", dump)
+
+    # ---------- usos dentro de .gctx ---------- #
+    def test_O_inside_context_with_o(self) -> None:
+        """
+        En un archivo de directivas:
+        · Contexto con -o y -O ⇒ archivo + STDOUT para ese contexto.
+        · Raíz sin -O ⇒ sin duplicación.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            out_path = Path(td) / "ctx.txt"
+            gctx = Path(td) / "sample.gctx"
+            gctx.write_text(
+                f"""
+                -h
+                -s .py
+
+                [ctx]
+                -a src/module/alpha.py
+                -o {out_path}
+                -O
+                """,
+                encoding="utf-8",
+            )
+
+            dump, stdout = self._run_capture(["-x", str(gctx)])
+            self.assertTrue(out_path.exists(), "El archivo -o debía crearse")
+            # Solo el contexto [ctx] debe reflejarse en STDOUT
+            self.assertInDump("def alpha", stdout)
+            # Aseguramos que el contenido se escribió también en el dump global
+            self.assertInDump("def alpha", dump)
 
 
 # --------------------------------------------------------------------------- #

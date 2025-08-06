@@ -30,7 +30,7 @@ ghconcat -s .py -s .xml -C -i -n 120 \
 ghconcat -F https://gaheos.com -s .html -l
 
 # 3 ─ Declarative multi-step pipeline with contexts
-ghconcat -x conf/pipeline.gcx -o build/artifact.txt
+ghconcat -x conf/pipeline.gctx -o build/artifact.txt
 ````
 
 ---
@@ -144,7 +144,7 @@ export OPENAI_API_KEY=sk-********************************
 | Audit an **Odoo add‑on** with no comments/imports   | `ghconcat -s .py -C -i -a addons/sale_extended`                                          |
 | Dry‑run (relative listing)                          | `ghconcat -s .py -a addons/sale_extended -l`                                             |
 | Dump `.py + .dart`, wrap and send to ChatGPT        | `ghconcat -s .py -s .dart -C -i -a src -u markdown --ai -t tpl/prompt.md -o ai/reply.md` |
-| Produce a multi‑step artefact via contexts          | `ghconcat -x ci_pipeline.gcx -o build/ci_bundle.txt`                                     |
+| Produce a multi‑step artefact via contexts          | `ghconcat -x ci_pipeline.gctx -o build/ci_bundle.txt`                                    |
 
 ---
 
@@ -207,7 +207,7 @@ export OPENAI_API_KEY=sk-********************************
 * Each `‑x` opens an **isolated environment**; its flags do not leak to the next `‑x`.
 * Inside the file, every line is parsed like CLI; contexts are created with `[name]`.
 
-```gcx
+```gctx
 # global defaults
 -w .
 -s .py -s .yml
@@ -301,7 +301,7 @@ ghconcat -s .js -s .dart -C -i -a lib -a web \
 <details>
 <summary><strong>11.3 Context pipeline with AI post‑processing</strong></summary>
 
-```gcx
+```gctx
 [concat]
 -w .
 -a src
@@ -323,7 +323,7 @@ ghconcat -s .js -s .dart -C -i -a lib -a web \
 ```
 
 ```bash
-ghconcat -x pipeline.gcx
+ghconcat -x pipeline.gctx
 ```
 
 </details>

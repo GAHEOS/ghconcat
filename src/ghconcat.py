@@ -12,8 +12,23 @@ import tempfile
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+import logging
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger("ghconcat")
+
+# Optional OpenAI import (lazy)
+try:
+    import openai  # type: ignore
+    from openai import OpenAIError  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    openai = None  # type: ignore
+
+
+    class OpenAIError(Exception):  # type: ignore
+        """Raised when the OpenAI SDK is unavailable."""
 
 # ───────────────────────────────  Constants  ────────────────────────────────
+_CLI_MODE: bool = False
 HEADER_DELIM: str = "===== "
 DEFAULT_OPENAI_MODEL: str = "o3"
 TOK_NONE: str = "none"
@@ -23,7 +38,6 @@ _LINE1_RE: re.Pattern[str] = re.compile(r"^\s*#\s*line\s*1\d*\s*$")
 
 # This cache is *per GhConcat.run()*; it is cleared on each public entry call.
 _SEEN_FILES: set[str] = set()
-
 _COMMENT_RULES: Dict[str, Tuple[
     re.Pattern[str],  # simple comment
     re.Pattern[str],  # full‑line comment
@@ -256,19 +270,53 @@ _COMMENT_RULES: Dict[str, Tuple[
 }
 
 _RE_BLANK: re.Pattern[str] = re.compile(r"^\s*$")
-_PLACEHOLDER: re.Pattern[str] = re.compile(r"\{([a-zA-Z_][\w\-]*)\}")
+_PLACEHOLDER: re.Pattern[str] = re.compile(
+    r"(?<!\{)\{([a-zA-Z_]\w*)}(?!})"
+)
 _ENV_REF: re.Pattern[str] = re.compile(r"\$([a-zA-Z_][\w\-]*)")
 
-# Optional OpenAI import (lazy)
-try:
-    import openai  # type: ignore
-    from openai import OpenAIError  # type: ignore
-except ModuleNotFoundError:  # pragma: no cover
-    openai = None  # type: ignore
+# ─────────────────────── “none” handling & env substitution  ────────────────
+_VALUE_FLAGS: Set[str] = {
+    "-w", "--workdir", "-W", "--workspace",
+    "-a", "--add-path", "-A", "--exclude-path",
+    "-f", "--url",
+    "-F", "--url-scrape",
+    "-d", "--url-scrape-depth",
+    "-D", "--disable-same-domain",
+    "-s", "--suffix", "-S", "--exclude-suffix",
+    "-n", "--total-lines", "-N", "--start-line",
+    "-t", "--template", "-o", "--output",
+    "-u", "--wrap", "--ai-model", "--ai-system-prompt",
+    "--ai-seeds", "--ai-temperature", "--ai-top-p",
+    "--ai-presence-penalty", "--ai-frequency-penalty",
+    "-e", "--env", "-E", "--global-env",
+}
 
-
-    class OpenAIError(Exception):  # type: ignore
-        """Raised when the OpenAI SDK is unavailable."""
+_INT_ATTRS: Set[str] = {
+    "total_lines", "first_line",
+    "url_scrape_depth",
+}
+_LIST_ATTRS: Set[str] = {
+    "add_path", "exclude_path", "suffix", "exclude_suf",
+    "hdr_flags", "path_flags", "blank_flags", "first_flags",
+    "urls", "url_scrape",
+}
+_BOOL_ATTRS: Set[str] = {
+    "rm_simple", "rm_all", "rm_import", "rm_export",
+    "keep_blank", "list_only", "absolute_path", "skip_headers",
+    "keep_header", "disable_url_domain_only"
+}
+_STR_ATTRS: Set[str] = {
+    "workdir", "workspace", "template", "wrap_lang",
+    "ai_model", "ai_system_prompt", "ai_seeds",
+}
+_FLT_ATTRS: Set[str] = {
+    "ai_temperature",
+    "ai_top_p",
+    "ai_presence_penalty",
+    "ai_frequency_penalty",
+}
+_NON_INHERITED: Set[str] = {"output", "unwrap", "ai"}
 
 
 # ───────────────────────────────  Data classes  ─────────────────────────────
@@ -287,7 +335,7 @@ class DirNode:
 # ─────────────────────────────  Aux helpers  ────────────────────────────────
 def _fatal(msg: str, code: int = 1) -> None:
     """Abort execution immediately with *msg* written to *stderr*."""
-    print(msg, file=sys.stderr)
+    logger.error(msg)
     sys.exit(code)
 
 
@@ -303,6 +351,35 @@ def _is_within(path: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _inject_positional_add_paths(tokens: List[str]) -> List[str]:
+    """
+    Expand every bare *token* that does **not** start with “-” into
+    the pair ``["-a", token]``.
+
+    Reglas:
+    • Respeta los flags que esperan valor (p.ej. “-o FILE”) manteniendo
+      su siguiente token intacto.
+    • No altera tokens que empiezan por «-».
+    """
+    out: List[str] = []
+    expect_value = False
+    for tok in tokens:
+        if expect_value:  # valor de un flag previo
+            out.append(tok)
+            expect_value = False
+            continue
+
+        if tok.startswith("-"):  # es otro flag
+            out.append(tok)
+            if tok in _VALUE_FLAGS:
+                expect_value = True  # el siguiente token es su argumento
+            continue
+
+        # Token posicional → equivale a “-a PATH”
+        out.extend(["-a", tok])
+    return out
 
 
 # ───────────────────────  Directive‑file parsing  ───────────────────────────
@@ -356,50 +433,6 @@ def _parse_directive_file(path: Path) -> DirNode:
             if line_toks:
                 current.tokens.extend(line_toks)
     return root
-
-
-# ─────────────────────── “none” handling & env substitution  ────────────────
-_VALUE_FLAGS: Set[str] = {
-    "-w", "--workdir", "-W", "--workspace",
-    "-a", "--add-path", "-A", "--exclude-path",
-    "-f", "--url",
-    "-F", "--url-scrape",
-    "-d", "--url-scrape-depth",
-    "-D", "--disable-same-domain"
-          "-s", "--suffix", "-S", "--exclude-suffix",
-    "-n", "--total-lines", "-N", "--start-line",
-    "-t", "--template", "-o", "--output",
-    "-u", "--wrap", "--ai-model", "--ai-system-prompt",
-    "--ai-seeds", "--ai-temperature", "--ai-top-p",
-    "--ai-presence-penalty", "--ai-frequency-penalty",
-    "-e", "--env", "-E", "--global-env",
-}
-
-_INT_ATTRS: Set[str] = {
-    "total_lines", "first_line",
-    "url_scrape_depth",
-}
-_LIST_ATTRS: Set[str] = {
-    "add_path", "exclude_path", "suffix", "exclude_suf",
-    "hdr_flags", "path_flags", "blank_flags", "first_flags",
-    "urls", "url_scrape",
-}
-_BOOL_ATTRS: Set[str] = {
-    "rm_simple", "rm_all", "rm_import", "rm_export",
-    "keep_blank", "list_only", "absolute_path", "skip_headers",
-    "keep_header", "disable_url_domain_only"
-}
-_STR_ATTRS: Set[str] = {
-    "workdir", "workspace", "template", "wrap_lang",
-    "ai_model", "ai_system_prompt", "ai_seeds",
-}
-_FLT_ATTRS: Set[str] = {
-    "ai_temperature",
-    "ai_top_p",
-    "ai_presence_penalty",
-    "ai_frequency_penalty",
-}
-_NON_INHERITED: Set[str] = {"output", "unwrap", "ai"}
 
 
 def _strip_none(tokens: List[str]) -> List[str]:
@@ -672,6 +705,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write final result to FILE (path resolved against −W).",
     )
     g_tpl.add_argument(
+        "-O", "--stdout",
+        action="store_true",
+        dest="to_stdout",
+        help="Duplicate the final output to STDOUT in this context.",
+    )
+    g_tpl.add_argument(
         "-u", "--wrap", metavar="LANG", dest="wrap_lang",
         help=(
             "Wrap each concatenated file in a fenced code-block using LANG "
@@ -869,7 +908,7 @@ def _gather_files(
 
     for root in dir_paths:
         if not root.exists():
-            print(f"⚠  {root} does not exist – skipped", file=sys.stderr)
+            logger.error(f"⚠  {root} does not exist – skipped")
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [
@@ -1017,7 +1056,6 @@ def _concat_files(
             parts.append(f"{HEADER_DELIM}{hdr_path} {HEADER_DELIM}\n")
             _SEEN_FILES.add(hdr_path)
 
-
         body = "".join(body_lines)
         parts.append(body)
 
@@ -1039,8 +1077,63 @@ def _concat_files(
 
 # ─────────────────────────────  AI helpers  ─────────────────────────────────
 def _interpolate(tpl: str, mapping: Dict[str, str]) -> str:
-    """Simple placeholder {var} → mapping[var] (missing ⇒ empty)."""
-    return _PLACEHOLDER.sub(lambda m: mapping.get(m.group(1), ""), tpl)
+    """
+    Replace every *{placeholder}* in *tpl* with its value from *mapping*.
+
+    Escaping rules
+    --------------
+    • ``{{literal}}``  → rendered as ``{literal}`` **without** interpolation.
+    • Single-brace placeholders are interpolated only if *mapping* provides
+      a value; otherwise they are replaced by the empty string (legacy
+      behaviour).
+
+    Parameters
+    ----------
+    tpl:
+        Raw template string that may contain placeholders.
+    mapping:
+        Dictionary of values to substitute.
+
+    Returns
+    -------
+    str
+        The interpolated template where:
+        1. ``{var}``      → mapping.get("var", "").
+        2. ``{{content}}``→ ``{content}`` (verbatim, no interpolation).
+    """
+    # First pass: interpolate {var} placeholders that are *not* escaped.
+    out: list[str] = []
+    i = 0
+    n = len(tpl)
+
+    def _is_ident(s: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z_]\w*", s))
+
+    while i < n:
+        # 1) Escapes «{{» y «}}»  → llave literal única
+        if tpl.startswith("{{", i):
+            out.append("{")
+            i += 2
+            continue
+        if tpl.startswith("}}", i):
+            out.append("}")
+            i += 2
+            continue
+
+        # 2) Placeholder {var}
+        if tpl[i] == "{":
+            j = tpl.find("}", i + 1)
+            if j != -1:
+                candidate = tpl[i + 1: j]
+                if _is_ident(candidate):
+                    out.append(mapping.get(candidate, ""))
+                    i = j + 1
+                    continue
+            # No placeholder válido → literal
+        out.append(tpl[i])
+        i += 1
+
+    return "".join(out)
 
 
 def _call_openai(  # pragma: no cover
@@ -1147,10 +1240,10 @@ def _fetch_urls(urls: List[str], cache_root: Path) -> List[Path]:
             dst = cache_dir / f"{idx}_{raw_name}"
             dst.write_bytes(data)
             downloaded.append(dst)
-            print(f"✔ fetched {link} → {dst}", file=sys.stderr)
+            logger.info(f"✔ fetched {link} → {dst}")
 
         except Exception as exc:  # noqa: BLE001
-            print(f"⚠  could not fetch {link}: {exc}", file=sys.stderr)
+            logger.error(f"⚠  could not fetch {link}: {exc}")
 
     return downloaded
 
@@ -1200,10 +1293,10 @@ def _scrape_urls(
                 name += _EXT_FALLBACK.get(ctype) or mimetypes.guess_extension(ctype) or ".html"
             dst = cache_dir / f"scr_{idx}_{name}"
             dst.write_bytes(data)
-            print(f"✔ scraped {url} (d={depth}) → {dst}", file=sys.stderr)
+            logger.info(f"✔ scraped {url} (d={depth}) → {dst}")
             return dst, ctype, data
         except Exception as exc:  # noqa: BLE001
-            print(f"⚠  could not scrape {url}: {exc}", file=sys.stderr)
+            logger.error(f"⚠  could not scrape {url}: {exc}")
             return None
 
     while queue:
@@ -1358,7 +1451,7 @@ def _execute_node(
         if ns_effective.url_scrape:
             max_depth = (
                 2 if ns_effective.url_scrape_depth is None
-                else ns_effective.url_scrape_depth      # permite 0
+                else ns_effective.url_scrape_depth  # permite 0
             )
             scraped_files = _scrape_urls(
                 ns_effective.url_scrape,
@@ -1375,9 +1468,9 @@ def _execute_node(
             *[
                 fp for fp in (*remote_files, *scraped_files)
                 if (
-                    (not suffixes or any(fp.name.endswith(s) for s in suffixes))
-                    and not any(fp.name.endswith(s)
-                                for s in set(exclude_suf) - set(suffixes))
+                        (not suffixes or any(fp.name.endswith(s) for s in suffixes))
+                        and not any(fp.name.endswith(s)
+                                    for s in set(exclude_suf) - set(suffixes))
                 )
             ],
         ]
@@ -1496,7 +1589,17 @@ def _execute_node(
     if out_path and not ns_effective.ai:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(final_out, encoding="utf-8")
-        print(f"✔ Output written → {out_path}")
+        logger.info(f"✔ Output written → {out_path}")
+
+    # ── 9.b  Envío a STDOUT según reglas ------------------------------
+    force_stdout = getattr(ns_effective, "to_stdout", False)
+    auto_root_stdout = (level == 0 and ns_effective.output in (None, TOK_NONE))
+    if force_stdout or (auto_root_stdout and not force_stdout):
+        # cuando el resultado se está redirigiendo a un pipe/archivo
+        if not sys.stdout.isatty():
+            sys.stdout.write(final_out)
+        else:  # sesión interactiva
+            print(final_out, end="")
 
     # ── 10. Dump sintético raíz cuando procede -----------------------------
     if level == 0 and final_out == "" and gh_dump:
@@ -1526,7 +1629,7 @@ def _perform_upgrade() -> None:  # pragma: no cover
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
         dest.chmod(dest.stat().st_mode | stat.S_IXUSR)
-        print(f"✔ Updated → {dest}")
+        logger.info(f"✔ Updated → {dest}")
     except Exception as exc:  # noqa: BLE001
         _fatal(f"Upgrade failed: {exc}")
     finally:
@@ -1537,11 +1640,11 @@ def _perform_upgrade() -> None:  # pragma: no cover
 # ────────────────────────────  Public API  ──────────────────────────────────
 class GhConcat:
     """
-    Programmatic entry‑point.
+    Programmatic entry-point.
 
-    * When an explicit «‑o» is present the file is written **and** also
+    * When an explicit «-o» is present the file is written **and** also
       returned as a *str* for convenience.
-    * Otherwise the in‑memory dump is returned.
+    * Otherwise the in-memory dump is returned.
     """
 
     @staticmethod
@@ -1549,12 +1652,14 @@ class GhConcat:
         """
         Execute ghconcat over *argv* and return the concatenation result.
 
-        Each «‑x FILE» starts a completely isolated directive tree.
+        Each «-x FILE» starts a completely isolated directive tree.
+        Bare paths passed at the CLI level are implicitly converted into
+        “-a PATH” arguments.
         """
         global _SEEN_FILES
         _SEEN_FILES = set()  # full reset per public call
 
-        # ── split by “‑x” -------------------------------------------------
+        # ── split by “-x” -------------------------------------------------
         units: List[Tuple[Optional[Path], List[str]]] = []
         cli_remainder: List[str] = []
 
@@ -1567,15 +1672,18 @@ class GhConcat:
                     _fatal("missing FILE after -x/--directives")
                 if not fpath.exists():
                     _fatal(f"directive file {fpath} not found")
-                units.append((fpath, cli_remainder))
+                # Normaliza los tokens acumulados antes de guardar
+                units.append((fpath, _inject_positional_add_paths(cli_remainder)))
                 cli_remainder = []
             else:
                 cli_remainder.append(tok)
 
+        # Cola final (sin -x explícito)
         if not units:
-            units.append((None, cli_remainder))
+            units.append((None, _inject_positional_add_paths(cli_remainder)))
         elif cli_remainder:
-            units[-1] = (units[-1][0], units[-1][1] + cli_remainder)
+            last_path, last_cli = units[-1]
+            units[-1] = (last_path, last_cli + _inject_positional_add_paths(cli_remainder))
 
         # ── execute each unit --------------------------------------------
         outputs: List[str] = []
@@ -1589,13 +1697,10 @@ class GhConcat:
                 root = DirNode()
                 root.tokens.extend(extra_cli)
 
-            # Dynamic call – eases unittest patch
+            # Self-upgrade shortcut
             if "--upgrade" in root.tokens:
-                if "ghconcat" in sys.modules:
-                    _perform_upgrade_safe = getattr(sys.modules["ghconcat"], "_perform_upgrade")
-                else:
-                    _perform_upgrade_safe = _perform_upgrade
-                _perform_upgrade_safe()
+                (_perform_upgrade if "ghconcat" not in sys.modules
+                 else getattr(sys.modules["ghconcat"], "_perform_upgrade"))()
 
             _, dump = _execute_node(root, None)
             outputs.append(dump)
@@ -1605,11 +1710,16 @@ class GhConcat:
 
 # ────────────────────────────  CLI main()  ──────────────────────────────────
 def main() -> None:  # pragma: no cover
-    """CLI dispatcher used by the real `ghconcat` executable."""
+    """
+    CLI dispatcher usado por el ejecutable real «ghconcat».
+
+    El manejo de STDOUT se delega ahora a _execute_node(), por lo que
+    aquí ya NO se emite automáticamente el resultado.
+    """
+    global _CLI_MODE
+    _CLI_MODE = True
     try:
-        result = GhConcat.run(sys.argv[1:])
-        if result and not sys.stdout.isatty():
-            sys.stdout.write(result)
+        GhConcat.run(sys.argv[1:])
     except KeyboardInterrupt:
         _fatal("Interrupted by user.", 130)
     except BrokenPipeError:
