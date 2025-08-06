@@ -1,0 +1,77 @@
+// ======================================================================
+//  ghconcat academic pipeline – Quantum Computing example
+//  All paths that do *not* start with “-” are implicitly “-a <path>”.
+// ======================================================================
+
+# Global settings ----------------------------------------------------------------
+-w .                                   # project root holding local notes/
+-W ./workspace                         # keep prompts + outputs separate
+-E topic="Quantum Computing and Photonics"  # Visible in *all* templates
+
+# -------------------------------------------------------------------------------
+# 0 · Gather raw corpus  →  sources                                            //
+# -------------------------------------------------------------------------------
+[sources]
+// Local markdown notes
+-a notes/
+
+// Two open‑access papers (HTML render)
+-F https://arxiv.org/abs/2303.11366     # Integrated Photonics for Quantum Computing
+-F https://arxiv.org/abs/2210.10255     # Boson sampling in the noisy intermediate scale
+
+-s .md -s .html -C -i -u markdown -h     # clean & wrap
+-o sources.md                            # expose as {sources}
+
+# -------------------------------------------------------------------------------
+# 1 · Junior researcher draft  →  junior                                        //
+# -------------------------------------------------------------------------------
+[junior]
+-a sources.md                  # feed the corpus
+-t prompts/junior.md                     # persona prompt (see below)
+--ai --ai-model o3                       # cheap deterministic model
+-o junior.md
+
+# -------------------------------------------------------------------------------
+# 2 · Senior researcher pass  →  senior                                         //
+# -------------------------------------------------------------------------------
+[senior]
+-a junior.md
+-t prompts/senior.md
+--ai --ai-model gpt-4o
+-o senior.md
+
+# -------------------------------------------------------------------------------
+# 3 · First academic critique  →  critic1                                       //
+# -------------------------------------------------------------------------------
+[critic1]
+-a senior.md
+-t prompts/critic.md
+--ai --ai-model gpt-4o
+-o critic1.md
+
+# -------------------------------------------------------------------------------
+# 4 · Language & style polish  →  redraft                                       //
+# -------------------------------------------------------------------------------
+[redraft]
+-a critic1.md
+-t prompts/editor.md
+--ai --ai-model gpt-4o
+-o redraft.md
+
+# -------------------------------------------------------------------------------
+# 5 · Final critique after polish  →  critic2                                   //
+# -------------------------------------------------------------------------------
+[critic2]
+-a redraft.md
+-t prompts/critic.md
+--ai --ai-model gpt-4o
+-o critic2.md
+
+# -------------------------------------------------------------------------------
+# 6 · Bundle for humans  →  final                                               //
+# -------------------------------------------------------------------------------
+[final]
+-a critic2.md
+-h -R                                     # add absolute path banner for traceability
+-o final_report.md
+-O                                        # duplicate to STDOUT

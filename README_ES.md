@@ -66,7 +66,7 @@ ghconcat -x conf/pipeline.gctx -o build/artifact.txt
 | **Componible por diseño**  | Mezcla *one‑liners*, archivos de directivas (`‑x`) y contexts jerárquicos en un solo script. |
 | **Solo‑lectura & atómico** | Nunca toca tus fuentes; escribe únicamente donde indiques (`‑o`).                            |
 | **LLM‑ready**              | Un único flag (`--ai`) conecta el dump con OpenAI.                                           |
-| **Cero dependencias**      | Python ≥ 3.8 puro. El puente con OpenAI es opcional (`pip install openai`).                  |
+| **Cero dependencias**      | Python ≥3.8 puro. El puente con OpenAI es opcional (`pip install openai`).                   |
 
 ---
 
@@ -242,7 +242,7 @@ ghconcat -a src -s .py \
 |------------------------------|------------------------------------------------------------------------------------------------------|
 | `-f URL` (fetch)             | Descarga la URL una vez y la trata como archivo local. Extensión inferida si falta.                  |
 | `-F URL` (scrape)            | Crawler limitado por profundidad; sigue enlaces `<a href="">` HTML. Enlaces sin extensión ⇒ `.html`. |
-| `-d / --url-scrape-depth`    | Profundidad máx. (def. 2, `0` solo la página semilla).                                               |
+| `-d / --url-scrape-depth`    | Profundidad máx. (def.2, `0` solo la página semilla).                                                |
 | `-D / --disable-same-domain` | Permite seguir enlaces hacia otros dominios.                                                         |
 | **Logs**                     | Mensajes a *stderr* `✔ fetched …` / `✔ scraped … (d=N)`.                                             |
 
@@ -255,7 +255,7 @@ ghconcat -a src -s .py \
 | Síntoma                          | Pista                                            |
 |----------------------------------|--------------------------------------------------|
 | Dump vacío                       | Revisa `-a/-s` y exclusiones `-A/-S`.            |
-| Timeout con ChatGPT              | Red, cuota o prompt > 128 k tokens.              |
+| Timeout con ChatGPT              | Red, cuota o prompt >128k tokens.                |
 | Placeholder sin resolver `{foo}` | Define con `-e foo=bar` o usa alias de contexto. |
 | Encabezados duplicados           | No mezcles `-h` internos con template raíz.      |
 | `flag expects VAR=VAL`           | Sintaxis incorrecta en `-e` o `-E`.              |

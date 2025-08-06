@@ -1,4 +1,28 @@
 #!/usr/bin/env python3
+"""
+ghconcat – hierarchical, language-agnostic concatenation & templating tool.
+
+Gaheos – https://gaheos.com
+Copyright (c) 2025 GAHEOS S.A.
+Copyright (c) 2025 Leonardo Gavidia Guerra <leo@gaheos.com>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
+
+# SPDX-FileCopyrightText: 2025 GAHEOS S.A.
+# SPDX-FileCopyrightText: 2025 Leonardo Gavidia Guerra
+# SPDX-License-Identifier: AGPL-3.0-or-later
 
 import argparse
 import json
@@ -13,6 +37,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import logging
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("ghconcat")
 
@@ -558,263 +583,269 @@ def _build_parser() -> argparse.ArgumentParser:
     g_ai = p.add_argument_group("AI integration")
     g_misc = p.add_argument_group("Miscellaneous")
 
-    # ── discovery
+    # ── discovery ────────────────────────────────────────────────────────────
     g_loc.add_argument(
         "-w", "--workdir", metavar="DIR", dest="workdir",
         help=(
-            "Root directory **containing the content files**. "
-            "Relative paths are resolved against the current working directory "
-            "(or against the parent context if inside a [context] block)."
+            "Root directory that will be *scanned for content files* in the current "
+            "context.  If omitted, the search starts at the current working directory. "
+            "Any other relative path (templates, outputs, “‑a PATH”, etc.) is first "
+            "resolved against this directory unless a parent context re‑defines it."
         ),
     )
     g_loc.add_argument(
         "-W", "--workspace", metavar="DIR", dest="workspace",
         help=(
-            "Workspace directory for **templates, prompts and output files**. "
-            "Relative paths are resolved against the current −w. "
-            "When omitted, it defaults to the workdir."
+            "Folder that holds *templates, prompts, AI artefacts and outputs*.  "
+            "Defaults to the current ‑w directory.  Paths given to ‑o/‑t/‑‑ai‑* are "
+            "resolved here, keeping project sources and generated files separated."
         ),
     )
     g_loc.add_argument(
         "-a", "--add-path", metavar="PATH", action="append", dest="add_path",
         help=(
-            "Add a file *or* directory to the inclusion set. "
-            "May be passed multiple times; directories are scanned recursively."
+            "Add a file **or** directory (recursively) to the inclusion set.  "
+            "May be repeated.  Bare CLI tokens that do *not* start with “‑” are "
+            "implicitly converted to this flag, so `ghconcat src utils` equals "
+            "`ghconcat -a src -a utils`."
         ),
     )
     g_loc.add_argument(
-        "-A", "--exclude-path", metavar="DIR", action="append",
-        dest="exclude_path",
+        "-A", "--exclude-path", metavar="DIR", action="append", dest="exclude_path",
         help=(
-            "Exclude an entire directory tree from discovery, even if it was "
-            "added by a broader −a.  Multiple use is allowed."
+            "Exclude an entire directory subtree from discovery, overriding any "
+            "broader inclusion rule.  Repeatable and honoured *before* suffix filters."
         ),
     )
     g_loc.add_argument(
         "-f", "--url", metavar="URL", action="append", dest="urls",
         help=(
-            "Fetch a remote URL and include its content as if it were a local "
-            "file.  Subject to the same filters and slicing rules applied to -a."
+            "Download a single remote resource and cache it under "
+            "<workspace>/.ghconcat_urlcache.  Its contents are then processed as if "
+            "it were a local file, subject to the same suffix, slicing and cleaning "
+            "rules that apply to files added with ‑a."
         ),
     )
     g_loc.add_argument(
         "-F", "--url-scrape", metavar="URL", action="append", dest="url_scrape",
         help=(
-            "Recursively crawl URL(s), download every linked resource that passes "
-            "the current suffix / exclusion filters, and include them as if they "
-            "were local files. Links without an extension are treated as .html."
+            "Start a *depth‑limited crawler* at each seed URL, downloading every "
+            "linked resource that matches the current suffix / exclusion filters.  "
+            "Links with no extension are assumed to be “.html” for filtering purposes."
         ),
     )
     g_loc.add_argument(
         "-d", "--url-scrape-depth", metavar="N", type=int,
-        dest="url_scrape_depth", default=1,
+        dest="url_scrape_depth", default=2,
         help=(
-            "Maximum recursion depth for -F/--url-scrape (default: 2). "
-            "Depth 0 processes only the seed URL(s) without following links."
+            "Maximum recursion depth for ‑F/‑‑url‑scrape (default: 2).  "
+            "`0` means scrape only the seed page itself, without following links."
         ),
     )
     g_loc.add_argument(
-        "-D", "--disable-same-domain",
-        action="store_true",
+        "-D", "--disable-same-domain", action="store_true",
         dest="disable_url_domain_only",
         help=(
-            "Disable the same-domain restriction when crawling with −F. "
-            "When this flag is present, links pointing to *any* external "
-            "scheme+host are followed.  Without −D, scraping is confined to "
-            "the seed URL’s scheme and host."
+            "Allow the scraper (‑F) to follow links *outside* the seed’s scheme+host.  "
+            "Without this flag, ghconcat remains confined to the original domain."
         ),
     )
     g_loc.add_argument(
         "-s", "--suffix", metavar="SUF", action="append", dest="suffix",
         help=(
-            "Include files with this suffix (e.g. “.py”). "
-            "Can be specified many times; at least one −s implies a positive "
-            "filter (everything else is ignored unless explicitly added)."
+            "Whitelist extensions (e.g. “.py”).  If at least one ‑s is present, the "
+            "suffix filter becomes *positive* (everything else is ignored unless "
+            "explicitly whitelisted by another rule).  Repeatable."
         ),
     )
     g_loc.add_argument(
-        "-S", "--exclude-suffix", metavar="SUF", action="append",
-        dest="exclude_suf",
+        "-S", "--exclude-suffix", metavar="SUF", action="append", dest="exclude_suf",
         help=(
-            "Exclude files with this suffix.  Explicit files given with −a "
-            "always win over exclusions."
+            "Blacklist extensions irrespective of origin (local or remote).  "
+            "An explicit file added with ‑a always wins over an exclusion suffix."
         ),
     )
 
-    # ── line slicing
+    # ── line slicing ──────────────────────────────────────────────────────────
     g_rng.add_argument(
         "-n", "--total-lines", metavar="NUM", type=int, dest="total_lines",
         help=(
-            "Limit each file to *NUM* lines (after header adjustments). "
-            "Combines with −N to create sliding windows."
+            "Keep at most NUM lines from each file *after* header adjustments.  "
+            "Combine with ‑N to create sliding windows."
         ),
     )
     g_rng.add_argument(
         "-N", "--start-line", metavar="LINE", type=int, dest="first_line",
-        help="Start concatenation from this 1-based line number.",
+        help=(
+            "Start concatenation at 1‑based line LINE.  Headers before this line are "
+            "kept or removed according to ‑m / ‑M."
+        ),
     )
     g_rng.add_argument(
         "-m", "--keep-first-line", dest="first_flags",
         action="append_const", const="keep",
-        help="Preserve the very first line even when −N > 1.",
+        help=(
+            "Always retain the very first physical line (shebang, encoding cookie, "
+            "XML prolog, etc.) even if slicing starts after it."
+        ),
     )
     g_rng.add_argument(
         "-M", "--no-first-line", dest="first_flags",
         action="append_const", const="drop",
-        help="Force-drop the very first line irrespective of −N.",
+        help="Force‑drop the first physical line regardless of other slicing flags.",
     )
 
-    # ── cleaning
+    # ── cleaning ──────────────────────────────────────────────────────────────
     g_cln.add_argument(
         "-c", "--remove-comments", action="store_true", dest="rm_simple",
-        help="Strip *inline* comments (language-aware).",
+        help="Remove *inline* comments while keeping full‑line comments intact.",
     )
     g_cln.add_argument(
         "-C", "--remove-all-comments", action="store_true", dest="rm_all",
-        help="Strip **all** comments, including full-line ones.",
+        help="Remove **all** comments, including full‑line ones.",
     )
     g_cln.add_argument(
         "-i", "--remove-import", action="store_true", dest="rm_import",
-        help="Remove Python/JS/Dart import statements.",
+        help="Strip `import`, `require`, `use`, `#include` statements as supported.",
     )
     g_cln.add_argument(
         "-I", "--remove-export", action="store_true", dest="rm_export",
-        help="Remove export / module-export statements.",
-    )
-    g_cln.add_argument(
-        "-B", "--keep-blank", dest="blank_flags",
-        action="append_const", const="keep",
-        help="Keep blank lines (overrides −b in the same scope).",
+        help="Strip `export` / `module.exports` declarations in JS/TS-like files.",
     )
     g_cln.add_argument(
         "-b", "--strip-blank", dest="blank_flags",
         action="append_const", const="strip",
-        help="Remove blank lines unless a sibling −B is present.",
+        help="Delete blank lines left after cleaning.",
+    )
+    g_cln.add_argument(
+        "-B", "--keep-blank", dest="blank_flags",
+        action="append_const", const="keep",
+        help="Preserve blank lines (overrides an inherited ‑b).",
     )
 
-    # ── template & output
+    # ── template & output ─────────────────────────────────────────────────────
     g_tpl.add_argument(
         "-t", "--template", metavar="FILE", dest="template",
         help=(
-            "Render the concatenation through this Jinja-lite template. "
-            "All per-context variables and $env are available as placeholders."
+            "Render the concatenation through a minimalist Jinja‑style template.  "
+            "Placeholders use single braces `{var}` and see per‑context variables, "
+            "`ghconcat_dump`, plus values set via ‑e/‑E."
         ),
     )
     g_tpl.add_argument(
         "-o", "--output", metavar="FILE", dest="output",
-        help="Write final result to FILE (path resolved against −W).",
+        help=(
+            "Write the *final* text to FILE (path resolved against the workspace).  "
+            "If omitted at the root context, the result streams to STDOUT."
+        ),
     )
     g_tpl.add_argument(
-        "-O", "--stdout",
-        action="store_true",
-        dest="to_stdout",
-        help="Duplicate the final output to STDOUT in this context.",
+        "-O", "--stdout", action="store_true", dest="to_stdout",
+        help=(
+            "Always duplicate the final output to STDOUT, even when ‑o is present.  "
+            "Useful for piping while still keeping an on‑disk copy."
+        ),
     )
     g_tpl.add_argument(
         "-u", "--wrap", metavar="LANG", dest="wrap_lang",
         help=(
-            "Wrap each concatenated file in a fenced code-block using LANG "
-            "as the info-string.  Use −U to cancel in a child context."
+            "Wrap every file body in a fenced code‑block.  The info‑string defaults "
+            "to LANG; pass an empty string to keep language‑less fences."
         ),
     )
     g_tpl.add_argument(
         "-U", "--no-wrap", action="store_true", dest="unwrap",
-        help="Cancel any inherited −u/-wrap directive.",
+        help="Cancel any inherited ‑u/‑‑wrap directive in this child context.",
     )
     g_tpl.add_argument(
         "-h", "--header", dest="hdr_flags",
         action="append_const", const="show",
-        help="Emit a heavy banner header before each file.",
+        help="Emit a heavy banner header before each *new* file (`===== path =====`).",
     )
     g_tpl.add_argument(
         "-H", "--no-headers", dest="hdr_flags",
         action="append_const", const="hide",
-        help="Suppress heavy headers in this scope.",
+        help="Suppress banner headers in this scope (child contexts may re‑enable).",
     )
     g_tpl.add_argument(
         "-r", "--relative-path", dest="path_flags",
         action="append_const", const="relative",
-        help="Print header paths relative to the −w directory (default).",
+        help="Show header paths relative to the current workdir (default).",
     )
     g_tpl.add_argument(
         "-R", "--absolute-path", dest="path_flags",
         action="append_const", const="absolute",
-        help="Print header paths as absolute filesystem paths.",
+        help="Show header paths as absolute file‑system paths.",
     )
     g_tpl.add_argument(
         "-l", "--list", action="store_true", dest="list_only",
-        help=(
-            "List matching filenames **instead of** their contents "
-            "(one path per line)."
-        ),
+        help="List matching file paths **instead of** their contents (one per line).",
     )
     g_tpl.add_argument(
         "-L", "--no-list", action="store_true", dest="no_list",
-        help=(
-            "Cancel an inherited −l/--list directive.  When both −l and −L "
-            "are present at the same context level, −L wins."
-        ),
+        help="Disable an inherited list mode within this context.",
     )
     g_tpl.add_argument(
         "-e", "--env", metavar="VAR=VAL", action="append", dest="env_vars",
         help=(
-            "Define a *local* placeholder variable visible only in the "
-            "current context.  Variables may reference previously defined "
-            "ones with the $VAR syntax."
+            "Define a *local* placeholder visible **only** in the current context.  "
+            "Placeholders may reference earlier ones using the `$VAR` syntax."
         ),
     )
     g_tpl.add_argument(
-        "-E", "--global-env", metavar="VAR=VAL", action="append",
-        dest="global_env",
-        help="Define a *global* variable visible in every nested context.",
+        "-E", "--global-env", metavar="VAR=VAL", action="append", dest="global_env",
+        help=(
+            "Define a *global* placeholder inherited by every descendant context.  "
+            "May be overridden locally with ‑e."
+        ),
     )
 
-    # ── AI integration
+    # ── AI integration ────────────────────────────────────────────────────────
     g_ai.add_argument(
         "--ai", action="store_true",
         help=(
             "Send the rendered text to an OpenAI chat endpoint.  Requires "
-            "OPENAI_API_KEY in the environment.  Output is saved to −o (or a "
-            "temp file when −o is omitted) and assigned to _ia_<ctx>."
+            "`OPENAI_API_KEY` in the environment.  The AI reply is written to ‑o "
+            "(or to a temp file if ‑o is absent) and exposed as `{_ia_ctx}`."
         ),
     )
     g_ai.add_argument(
         "--ai-model", metavar="MODEL", default=DEFAULT_OPENAI_MODEL,
-        help="OpenAI chat model to use (default: %(default)s).",
+        help="Chat model to use (default: o3).",
     )
     g_ai.add_argument(
         "--ai-temperature", type=float, metavar="NUM",
-        help="Sampling temperature for non-o3 models (0–2).",
+        help="Sampling temperature for non‑o3 models (range 0–2).",
     )
     g_ai.add_argument(
         "--ai-top-p", type=float, metavar="NUM",
-        help="Top-p nucleus sampling parameter.",
+        help="Top‑p nucleus sampling parameter.",
     )
     g_ai.add_argument(
         "--ai-presence-penalty", type=float, metavar="NUM",
-        help="Presence-penalty parameter.",
+        help="Presence‑penalty parameter.",
     )
     g_ai.add_argument(
         "--ai-frequency-penalty", type=float, metavar="NUM",
-        help="Frequency-penalty parameter.",
+        help="Frequency‑penalty parameter.",
     )
     g_ai.add_argument(
         "--ai-system-prompt", metavar="FILE",
-        help="System prompt file to prepend to the chat.",
+        help="Template‑aware system prompt file to prepend to the chat.",
     )
     g_ai.add_argument(
         "--ai-seeds", metavar="FILE",
-        help="File containing JSONL seed messages to prime the chat.",
+        help="JSONL file with seed messages to prime the chat.",
     )
 
-    # ── miscellaneous
+    # ── miscellaneous ─────────────────────────────────────────────────────────
     g_misc.add_argument(
         "--upgrade", action="store_true",
-        help="Self-update ghconcat from the official GAHEOS repository.",
+        help="Self‑update ghconcat from the official GAHEOS repository into ~/.bin.",
     )
     g_misc.add_argument(
         "--help", action="help",
-        help="Show this help message and exit.",
+        help="Show this integrated help message and exit.",
     )
 
     return p
