@@ -1384,7 +1384,13 @@ def _merge_ns(parent: argparse.Namespace, child: argparse.Namespace) -> argparse
             merged[key] = val if val not in (None, "") else merged.get(key)
         else:
             merged[key] = val
-
+    if merged.get("workspace") and not Path(merged["workspace"]).is_absolute():
+        # hereda ruta relativa; conviértela a absoluta desde el parent
+        merged["workspace"] = str(
+            Path(parent.workspace).joinpath(merged["workspace"]).resolve()
+            if parent and getattr(parent, "workspace", None)
+            else Path(merged["workspace"]).resolve()
+        )
     ns = argparse.Namespace(**merged)
     _post_parse(ns)
     return ns
@@ -1433,10 +1439,13 @@ def _execute_node(
     # ── 2. Resolución de workdir / workspace ───────────────────────────────
     root_base = parent_root or Path.cwd()
     root = _resolve_path(root_base, ns_effective.workdir or ".")
+
     workspace = (
         _resolve_path(parent_workspace or root, ns_effective.workspace)
         if ns_effective.workspace else root
     )
+
+    ns_effective.workspace = str(workspace)  # freeze as absolute path
     if not root.exists():
         _fatal(f"--workdir {root} not found")
     if not workspace.exists():

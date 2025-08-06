@@ -47,8 +47,8 @@ ghconcat -x conf/pipeline.gctx -o build/artifact.txt
 8. [Templating & Variables](#8--templating--variables)
 9. [AI Gateway](#9--ai-gateway)
 10. [Workspaces & Outputs](#10--workspaces--outputs)
-11. [Recipes](#11--recipes)
-12. [Remote URL Ingestion & Scraping](#12--remote-url-ingestion--scraping)
+11. [Remote URL Ingestion & Scraping](#11--remote-url-ingestion--scraping)
+12. [Recipes](#12--recipes)
 13. [Troubleshooting](#13--troubleshooting)
 14. [Environment & Exit Codes](#14--environment--exit-codes)
 15. [Contribution Guide](#15--contribution-guide)
@@ -285,7 +285,17 @@ In templates, escape braces with `{{`/`}}` to print a literal `{}`.
 
 ---
 
-## 11 · Recipes
+## 11 · Remote URL Ingestion & Scraping
+
+| Flag     | Behaviour                                                                               |
+|----------|-----------------------------------------------------------------------------------------|
+| `-f URL` | Single fetch. File saved in `.ghconcat_urlcache`; name inferred if needed.              |
+| `-F URL` | Depth‑limited crawler; follows links in HTML; honours suffix filters **during** crawl.  |
+| `-d N`   | Maximum depth (default 2, `0` = no links).                                              |
+| `-D`     | Follow links across domains.                                                            |
+| Logs     | `✔ fetched …` / `✔ scraped … (d=N)` messages on **stderr**. Silence with `2>/dev/null`. |
+
+## 12 · Recipes
 
 <details>
 <summary>11.1 Diff‑friendly dump for code‑review</summary>
@@ -355,17 +365,303 @@ ghconcat -a src -s .py \
 
 </details>
 
+<details>
+<summary>11.5 Large‑scale academic literature synthesis pipeline 📚🤖 (one‑shot `‑x`)</summary>
+
+> This recipe demonstrates how **one single directive file** orchestrates an end‑to‑end scholarly workflow powered by
+> multiple LLM “personas”.
+> We will:
+>
+> 1. Harvest primary sources from local notes **and** remote open‑access URLs.
+> 2. Let a *junior researcher* create the first‑pass synthesis.
+> 3. Ask a *senior researcher* to refine it.
+> 4. Invite an *academic critic* to challenge the claims.
+> 5. Apply a *language editor* to improve clarity and style.
+> 6. Call the critic **again** for a final peer‑review.
+> 7. Save the polished report for the human team to iterate on.
+
+The whole flow is encoded in **`academic_pipeline.gctx`** (see below).
+All intermediate artefacts live inside the *workspace*; every stage can reuse the previous one either through
+`-a workspace/<file>` **or** by referencing the context alias in a template (`{junior}`, `{senior}`, …).
+
+#### Run it
+
+```bash
+ghconcat -x academic_pipeline.gctx -O
+# The final manuscript appears on STDOUT and is also written to workspace/final_report.md
+```
+
 ---
 
-## 12 · Remote URL Ingestion & Scraping
+#### `academic_pipeline.gctx`
 
-| Flag     | Behaviour                                                                               |
-|----------|-----------------------------------------------------------------------------------------|
-| `-f URL` | Single fetch. File saved in `.ghconcat_urlcache`; name inferred if needed.              |
-| `-F URL` | Depth‑limited crawler; follows links in HTML; honours suffix filters **during** crawl.  |
-| `-d N`   | Maximum depth (default 2, `0` = no links).                                              |
-| `-D`     | Follow links across domains.                                                            |
-| Logs     | `✔ fetched …` / `✔ scraped … (d=N)` messages on **stderr**. Silence with `2>/dev/null`. |
+```text
+// ======================================================================
+//  ghconcat academic pipeline – Quantum Computing example
+//  All paths that do *not* start with “-” are implicitly “-a <path>”.
+// ======================================================================
+
+# Global settings ----------------------------------------------------------------
+-w .                                   # project root holding local notes/
+-W workspace                            # keep prompts + outputs separate
+-E topic="Quantum Computing and Photonics"  # Visible in *all* templates
+
+# -------------------------------------------------------------------------------
+# 0 · Gather raw corpus  →  sources                                            //
+# -------------------------------------------------------------------------------
+[sources]
+// Local markdown notes
+-a notes/
+
+// Two open‑access papers (HTML render)
+-F https://arxiv.org/abs/2303.11366     # Integrated Photonics for Quantum Computing
+-F https://arxiv.org/abs/2210.10255     # Boson sampling in the noisy intermediate scale
+
+-s .md -s .html -C -i -u markdown -h     # clean & wrap
+-o sources.md                            # expose as {sources}
+
+# -------------------------------------------------------------------------------
+# 1 · Junior researcher draft  →  junior                                        //
+# -------------------------------------------------------------------------------
+[junior]
+-a workspace/sources.md                  # feed the corpus
+-t prompts/junior.md                     # persona prompt (see below)
+--ai --ai-model o3                       # cheap deterministic model
+-o junior.md
+
+# -------------------------------------------------------------------------------
+# 2 · Senior researcher pass  →  senior                                         //
+# -------------------------------------------------------------------------------
+[senior]
+-a workspace/junior.md
+-t prompts/senior.md
+--ai --ai-model gpt-4o
+-o senior.md
+
+# -------------------------------------------------------------------------------
+# 3 · First academic critique  →  critic1                                       //
+# -------------------------------------------------------------------------------
+[critic1]
+-a workspace/senior.md
+-t prompts/critic.md
+--ai --ai-model gpt-4o
+-o critic1.md
+
+# -------------------------------------------------------------------------------
+# 4 · Language & style polish  →  redraft                                       //
+# -------------------------------------------------------------------------------
+[redraft]
+-a workspace/critic1.md
+-t prompts/editor.md
+--ai --ai-model gpt-4o
+-o redraft.md
+
+# -------------------------------------------------------------------------------
+# 5 · Final critique after polish  →  critic2                                   //
+# -------------------------------------------------------------------------------
+[critic2]
+-a workspace/redraft.md
+-t prompts/critic.md
+--ai --ai-model gpt-4o
+-o critic2.md
+
+# -------------------------------------------------------------------------------
+# 6 · Bundle for humans  →  final                                               //
+# -------------------------------------------------------------------------------
+[final]
+-a workspace/critic2.md
+-h -R                                     # add absolute path banner for traceability
+-o final_report.md
+-O                                        # duplicate to STDOUT
+```
+
+#### Prompt files
+
+> Store these under `prompts/` (relative to the workspace).
+> Every template can access:
+>
+> * `{topic}` – global variable defined with `‑E`.
+> * `{sources}`, `{junior}`, `{senior}`, … – context aliases.
+
+##### prompts/junior.md
+
+```markdown
+### Role
+
+You are a **junior research associate** preparing an initial literature review on **{topic}**.
+
+### Task
+
+1. Read the raw corpus delimited by `<<<` / `>>>`.
+2. Extract **key research questions**, **methodologies**, and **major findings**.
+3. Output a *numbered outline* (max 1 000 words).
+
+=====
+{sources}
+=====
+```
+
+##### prompts/senior.md
+
+```markdown
+### Role
+
+You are a **senior principal investigator** mentoring a junior colleague.
+
+### Task
+
+Improve the draft below by:
+
+* Merging redundant points.
+* Adding missing seminal works you are aware of.
+* Flagging any methodological weaknesses.
+
+Return a revised outline with inline comments where changes were made.
+
+=====
+{junior}
+=====
+```
+
+##### prompts/critic.md
+
+```markdown
+### Role
+
+You serve on a *blind peer‑review committee*.
+
+### Task
+
+1. Critically evaluate logical coherence, evidential support and novelty claims.
+2. Highlight **factual inaccuracies** or missing citations.
+3. Grade each section (A–D) and justify the grade in 30 words max.
+
+Document under review:
+
+=====
+{senior}{{redraft}}  <!-- the template receives whichever context is fed -->
+=====
+```
+
+##### prompts/editor.md
+
+```markdown
+### Role
+
+Professional **science copy‑editor**.
+
+### Task
+
+Rewrite the document for clarity, concision and formal academic tone.  
+Fix passive‑voice overuse, tighten sentences, and ensure IEEE reference style.
+
+Source (critically reviewed):
+
+=====
+{critic1}
+=====
+```
+
+##### notes/note_lab_log_2025-06-03.md
+
+```markdown
+# Lab Log – 3 Jun 2025
+
+*Integrated Silicon Nitride Waveguides for On-Chip Entanglement*
+
+## Objective
+
+Test the latest Si₃N₄ waveguide batch (run #Q-0601) for loss, birefringence and two-photon interference visibility.
+
+## Setup
+
+| Item         | Model                                 | Notes          |
+|--------------|---------------------------------------|----------------|
+| Pump laser   | TOPTICA iBeam-Smart 775 nm            | 10 mW CW       |
+| PPLN crystal | Period = 7.5 µm                       | Type-0 SPDC    |
+| Chip mount   | Temperature-controlled (25 ± 0.01 °C) | –              |
+| Detectors    | SNSPD pair, η≈80 %                    | Jitter ≈ 35 ps |
+
+## Key results
+
+* Propagation loss **1.3 dB ± 0.1 dB cm⁻¹** @ 1550 nm (cut-back).
+* HOM dip visibility **91 %** without spectral filtering (best so far).
+* No appreciable birefringence within ±0.05 nm tuning range.
+
+> **TODO**: simulate dispersion for 3 cm spirals; schedule e-beam mask adjustments.
+```
+
+##### notes/note_conference_summary_QIP2025.md
+
+```markdown
+# QIP 2025 – Hot-topic Session Summary
+
+*Tokyo, 27 Jan 2025*
+
+## 1. Boson Sampling Beyond 100 Photons
+
+**Speaker:** Jian-Wei Pan
+
+* Claimed 1 × 10⁻²₃ sampling hardness bound using 144-mode interferometer.
+* Introduced time-domain multiplexing scheme; reduces footprint 40 ×.
+
+## 2. Error-Corrected Photonic Qubits
+
+**Speaker:** Stefanie Barz
+
+* Demonstrated **[[4,2,2]]** code on dual-rail qubits with 97 % heralded fidelity.
+* Cluster-state growth via fusion-II gates reached 10⁶ physical time-bins.
+
+## 3. NV-Centre to Photon Transduction
+
+**Speaker:** M. Atatüre
+
+* On-chip diamond-SiN evanescent coupling, g≈30 MHz.
+* Outlook: deterministic Bell-state delivery at >10 k links.
+
+### Cross-cutting trends
+
+* Integrated PPLN and thin-film LiNbO₃ are **everywhere**.
+* Shift from bulk optics toward heterogeneous III-V + SiN platforms.
+* Community rallying around **“error mitigation before error correction”** mantra.
+```
+
+##### notes/note_review_article_highlights.md
+
+```markdown
+# Highlights – Review: *“Photonic Quantum Processors”* (Rev. Mod. Phys. 97, 015005 (2025))
+
+| Section              | Take-away                                                                                                | Open questions                                                    |
+|----------------------|----------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------|
+| Linear-optical gates | Deterministic CNOT remains >90 dB loss-budget dream; hybrid measurement-based approaches most promising. | Can η_det ≥ 95 % SNSPDs plus temporal multiplexing close the gap? |
+| Integrated sources   | On-chip χ² micro-rings achieve 300 MHz pair rate at p-pump = 40 mW.                                      | Thermal cross-talk scaling beyond 100 sources?                    |
+| Error models         | Dephasing now dominates over loss in tightly confined waveguides.                                        | Need unified benchmarking across foundries.                       |
+| Applications         | Near-term advantage in photonic machine-learning inference.                                              | Energy/latency trade-off vs silicon AI accelerators.              |
+
+### Author’s critique
+
+The review glosses over cryo-packaging challenges and the *actual* cost of ultra-low-loss SiN (≤0.5 dB m⁻¹). Include
+comparative LCA data in future work.
+````
+
+##### What just happened?
+
+| Stage     | Input                         | Template            | AI? | Output (alias)    |
+|-----------|-------------------------------|---------------------|-----|-------------------|
+| `sources` | Local notes + two ArXiv pages | — (raw concat)      | ✗   | `{sources}`       |
+| `junior`  | `sources.md`                  | `junior.md`         | ✔   | `{junior}`        |
+| `senior`  | `junior.md`                   | `senior.md`         | ✔   | `{senior}`        |
+| `critic1` | `senior.md`                   | `critic.md`         | ✔   | `{critic1}`       |
+| `redraft` | `critic1.md`                  | `editor.md`         | ✔   | `{redraft}`       |
+| `critic2` | `redraft.md`                  | `critic.md`         | ✔   | `{critic2}`       |
+| `final`   | `critic2.md` (no AI)          | — (banner + concat) | ✗   | `final_report.md` |
+
+The final manuscript is **fully traceable**: every intermediate file is preserved, headers show absolute paths, and you
+can replay any stage by re‑running its context with different flags or a different model.
+
+Happy researching!
+
+</details>
 
 ---
 
