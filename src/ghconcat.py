@@ -555,6 +555,7 @@ def _parse_git_spec(spec: str) -> Tuple[str, Optional[str], Optional[str]]:
         url_part, tail = spec.split("^", 1)
         if "/" in tail:
             branch, sub_path = tail.split("/", 1)
+            sub_path = sub_path.lstrip("/")  # ← NUEVO
         else:
             branch, sub_path = tail, None
     else:
@@ -590,8 +591,13 @@ def _clone_git_repo(repo_url: str, branch: Optional[str], cache_root: Path) -> P
     already exists.  Returns the path to the checked‑out work‑tree.
     """
     key = (repo_url, branch)
-    if key in _GIT_CLONES:  # Re‑use clone inside the same ghconcat run
-        return _GIT_CLONES[key]
+
+    if key in _GIT_CLONES:
+        cached = _GIT_CLONES[key]
+        if cached.exists():  # sigue en disco → OK
+            return cached
+        # El directorio fue borrado: elimina la entrada y clona de nuevo
+        del _GIT_CLONES[key]
 
     digest = sha1(f"{repo_url}@{branch or 'HEAD'}".encode()).hexdigest()[:12]
     dst = cache_root / digest
@@ -667,8 +673,12 @@ def _collect_git_files(
 
     for root in include_roots:
         if not root.exists():
-            logger.warning(f"⚠  {root} does not exist – skipped")
-            continue
+            anc = next((p for p in root.parents if p.exists()), None)
+            if anc is None:
+                logger.warning(f"⚠  {root} does not exist – skipped")
+                continue
+            logger.debug(f"↪  {root} missing, walking ancestor {anc}")
+            root = anc
 
         if root.is_file():
             if root.resolve() not in excl_files and not _skip_suffix(root):
@@ -2108,6 +2118,7 @@ class GhConcat:
         """
         global _SEEN_FILES
         _SEEN_FILES = set()  # full reset per public call
+        _GIT_CLONES.clear()
 
         # ── split by “-x” -------------------------------------------------
         units: List[Tuple[Optional[Path], List[str]]] = []

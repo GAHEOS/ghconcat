@@ -917,11 +917,12 @@ class GitRepositoryTests(GhConcatBaseTest):
         dump = _run([
             "-h",
             "-s", ".py",
-            "-g", f"{self.REPO_URL}^dev/src/__init__.py",
+            "-l",
+            "-g", f"{self.REPO_URL}^dev/tests/test_ghconcat.py",
         ])
         # Only the targeted file appears
-        self.assertInDump("__init__.py", dump)
-        self.assertEqual(dump.count(HEADER_DELIM), 2,
+        self.assertInDump("test_ghconcat.py", dump)
+        self.assertEqual(dump.count(HEADER_DELIM), 0,
                          "only one header banner expected (one file)")
 
     def test_specific_branch(self) -> None:
