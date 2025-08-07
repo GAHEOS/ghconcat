@@ -1807,7 +1807,7 @@ def _call_openai(  # pragma: no cover
     messages.append({"role": "user", "content": prompt})
 
     params: Dict[str, object] = {"model": model, "messages": messages, "timeout": timeout}
-    if not model.lower().startswith("o"):
+    if not model.lower().startswith("o") or model.lower().startswith("gpt-5"):
         if temperature is not None:
             params["temperature"] = temperature
         if top_p is not None:
