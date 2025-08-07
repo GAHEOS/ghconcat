@@ -1,0 +1,63 @@
+# =============================================================================
+#  ghconcat pipeline – Odoo 17 "gaheos_vet_clinic"
+# =============================================================================
+
+# 0 · Functional spec                             → {spec}
+[spec]
+-w .
+-a docs/spec_vet_clinic.md
+-o workspace/spec.txt
+-u spec-md
+
+# 1 · Senior Dev asks IA for full addon           → {senior_code}
+[senior_code]
+-a workspace/spec.txt
+-E module_name="gaheos_vet_clinic"
+-u markdown
+-t prompts/senior.md
+--ai --ai-model o3
+-o workspace/senior_module.md
+
+# 2 · QA reviews the generated addon              → {qa_feedback}
+[qa_feedback]
+-a workspace/senior_module.md
+-t prompts/qa.md
+--ai --ai-model gpt-4o
+-o workspace/qa_feedback.md
+
+# 3 · Senior Dev refines code per QA              → {revised_code}
+[addon_code]
+-a workspace/senior_module.md
+-a workspace/qa_feedback.md
+-t prompts/senior_revision.md
+--ai --ai-model gpt-4o
+-o workspace/revised_module.md
+
+# 4 · Tester writes initial unit tests            → {tests_v1}
+[tests_v1]
+-a workspace/revised_module.md
+-t prompts/tester.md
+--ai --ai-model gpt-4o
+-o workspace/tests_v1.md
+
+# 5 · QA revises the tests                        → {qa_tests}
+[qa_tests]
+-a workspace/tests_v1.md
+-t prompts/qa_tests.md
+--ai --ai-model gpt-4o
+-o workspace/qa_tests_feedback.md
+
+# 6 · Tester improves tests                       → {tests_v2}
+[tests_v2]
+-a workspace/tests_v1.md
+-a workspace/qa_tests_feedback.md
+-t prompts/tester_improve.md
+--ai --ai-model gpt-4o
+-o workspace/tests_v2.md
+
+# 7 · Bundle final addon + tests                  → artefact + STDOUT
+[final]
+-a workspace/revised_module.md
+-a workspace/tests_v2.md
+-h -R
+-o final/gaheos_vet_clinic_bundle.md

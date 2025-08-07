@@ -1,0 +1,98 @@
+===== /Users/leonardo/Odoo/17.0/GAHEOS-17.0/ghconcat/examples/odoo_vet_clinic/workspace/revised_module.md ===== 
+## Role
+Senior Developer.
+
+## Task
+Refactor the addon to fix every High/Medium issue reported.
+
+### QA findings
+## Role
+QA Engineer focused on Odoo technical quality.
+
+## Task
+Audit the addon for: security, performance, docstrings, compliance with spec.
+
+### Deliverable
+Markdown table: **File · Severity (High/Med/Low) · Issue · Recommendation**  
+Finish with overall verdict ✅ or ❌.
+
+### Code to audit
+## Role
+You are a **Senior Odoo Developer**.  
+Generate a small, production‑ready addon for Odoo 17 named `gaheos_vet_clinic`.
+
+## Functional spec
+```spec-md
+# Functional Spec – gaheos_vet_clinic
+
+## Purpose
+
+Minimal veterinary management addon for Odoo 17 aimed at small clinics.
+
+## Data model
+
+| Model            | Fields                                                                                                                                  | Notes                     |
+|------------------|-----------------------------------------------------------------------------------------------------------------------------------------|---------------------------|
+| gaheos.vet.owner | `name: Char` **required**<br>`phone: Char`<br>`email: Char`                                                                             | Basic owner info          |
+| gaheos.vet.pet   | `name: Char` **required**<br>`owner_id: Many2one('gaheos.vet.owner')`<br>`species: Selection('dog','cat','other')`<br>`birthdate: Date` | One owner → many pets     |
+| gaheos.vet.visit | `pet_id: Many2one('gaheos.vet.pet')`<br>`visit_date: Datetime` (default *now*)<br>`weight: Float`<br>`notes: Text`                      | Basic consultation record |
+
+## Business rules
+
+1. Deleting an owner must cascade to pets and visits (`ondelete='cascade'`).
+2. Visits of the future are not allowed.
+3. Only users in group **`group_vet_user`** can create/write visits; unlink reserved to **`group_vet_manager`**.
+
+## Minimal UI (out of scope for code generation)
+
+* List views for owners, pets and visits.
+```
+
+
+## Requirements
+* Full addon: manifest, models, security (CSV), init files.
+* Python code PEP 8 + type hints + English docstrings.
+* One model per table described, plus any helper mixins you need.
+* Enforce Rule 2 (no future visits) at model level.
+* Provide demo data only if strictly necessary.
+
+## Output format
+For each file emit:
+
+\===== addons/{module\_name}/<path>/<file> =====
+
+```python
+# file content
+```
+
+One fenced block per file, no commentary outside.
+
+### Odoo Addon Code
+
+
+### Output
+Re‑emit the full addon in the same file‑per‑block format.
+===== /Users/leonardo/Odoo/17.0/GAHEOS-17.0/ghconcat/examples/odoo_vet_clinic/workspace/tests_v2.md ===== 
+## Role
+
+Tester.
+
+## Task
+
+Apply QA feedback, deliver improved tests (replace previous).
+
+### QA feedback
+
+## Role
+QA Engineer.
+
+## Task
+Review the tests, list gaps or false positives (table format).
+
+### Code to review
+
+
+
+### Tests to improve
+
+
