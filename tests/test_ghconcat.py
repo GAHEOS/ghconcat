@@ -1022,6 +1022,61 @@ class ReplacePreserveTests(GhConcatBaseTest):
         self.assertEqual(dump.lower().count("bar"), 3)
 
 
+class PDFExtractionTests(GhConcatBaseTest):
+    """
+    Verifica que la integración de lectura PDF (pypdf → OCR opcional)
+    funciona dentro del flujo normal de *ghconcat*.
+
+    * Salta automáticamente si el archivo PDF no existe o si falta la
+      librería `pypdf` en el entorno de pruebas (manteniendo verde el
+      pipeline cuando el soporte PDF no está instalado).
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            import pypdf  # noqa: F401
+        except ModuleNotFoundError:
+            raise unittest.SkipTest("pypdf no instalado – se omite prueba PDF")
+
+    # ------------------------------------------------------------------ #
+    #  Pruebas                                                           #
+    # ------------------------------------------------------------------ #
+    def test_pdf_text_is_concatenated(self) -> None:
+        """
+        Ejecuta ghconcat contra el PDF y comprueba que el texto esperado
+        aparece en el dump final.
+        """
+        pdf = TOOLS_DIR / "extra" / "sample.pdf"
+        dump = _run([
+            "-s", ".pdf",
+            "-a", str(pdf),
+            "-h",  # encabezado para depuración humana (opcional)
+        ])
+
+        # Comprueba que el banner del PDF está presente
+        self.assertInDump(pdf.name, dump)
+        # Comprueba la cadena conocida dentro del cuerpo
+        self.assertInDump("de Herramientas", dump)
+
+    def test_pdf_image_with_text_is_concatenated(self) -> None:
+        """
+        Ejecuta ghconcat contra el PDF y comprueba que el texto esperado
+        aparece en el dump final.
+        """
+        pdf = TOOLS_DIR / "extra" / "sample2.pdf"
+        dump = _run([
+            "-s", ".pdf",
+            "-a", str(pdf),
+            "-h",  # encabezado para depuración humana (opcional)
+        ])
+
+        # Comprueba que el banner del PDF está presente
+        self.assertInDump(pdf.name, dump)
+        # Comprueba la cadena conocida dentro del cuerpo
+        self.assertInDump("GAHEOS", dump)
+
+
 # --------------------------------------------------------------------------- #
 #  Utility for writing small template files                                   #
 # --------------------------------------------------------------------------- #

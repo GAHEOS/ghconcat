@@ -16,7 +16,7 @@ Typical use‑cases:
 ## 0 · TL;DR – Quick Cheat‑Sheet
 
 ```bash
-# 1 ─ Local + remote: dump .py + .xml under addons/ & web/, ALSO scrape
+# 1 ─ Local + remote: dump .py + .xml **and .pdf** under addons/ & web/, ALSO scrape
 #     https://gaheos.com two levels deep **AND** a single file from GitHub,
 #     Markdown-wrap, send to OpenAI:
 ghconcat -s .py -s .xml -C -i -n 120 \
@@ -24,6 +24,7 @@ ghconcat -s .py -s .xml -C -i -n 120 \
          -g https://github.com/GAHEOS/ghconcat^dev/src/ghconcat.py \
          -F https://gaheos.com -d 2 \
          -u markdown \
+         -s .pdf -y '/Confidential//g' \  # ← PDF incluido, limpia marcas de agua
          -t ai/prompt.tpl \
          -y '/secret//g' -Y '/secret_token/' # …replace all “secret” except literal “secret_token”
          --ai --ai-model o3 \
