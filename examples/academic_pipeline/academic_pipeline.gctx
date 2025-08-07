@@ -5,7 +5,6 @@
 
 # Global settings ----------------------------------------------------------------
 -w .                                   # project root holding local notes/
--W workspace                         # keep prompts + outputs separate
 -E topic="Quantum Computing and Photonics"  # Visible in *all* templates
 
 # -------------------------------------------------------------------------------
@@ -19,12 +18,12 @@
 
 -K                                      # clean text (remove html tags, scripts, etc)
 -s .html -C -i -u web-research -h       # clean & wrap
--o sources.md                           # expose as {sources}
+-o workspace/sources.md                           # expose as {sources}
 
 [notes]
 -a notes/
 -s .md -u note -h                       # clean & wrap
--o notes.md                             # expose as {sources}
+-o workspace/notes.md                             # expose as {sources}
 
 # -------------------------------------------------------------------------------
 # 1 · Junior researcher draft  →  junior                                        //
@@ -34,7 +33,7 @@
 -a workspace/notes.md                    # feed the corpus
 -t prompts/junior.md                     # persona prompt (see below)
 --ai --ai-model o3                       # cheap deterministic model
--o junior.out.md
+-o workspace/junior.out.md
 
 # -------------------------------------------------------------------------------
 # 2 · Senior researcher pass  →  senior                                         //
@@ -43,7 +42,7 @@
 -a workspace/junior.out.md
 -t prompts/senior.md
 --ai --ai-model gpt-4o
--o senior.out.md
+-o workspace/senior.out.md
 -E to_critic=$senior
 
 # -------------------------------------------------------------------------------
@@ -53,7 +52,7 @@
 -a workspace/senior.out.md
 -t prompts/critic.md
 --ai --ai-model gpt-4o
--o critic1.out.md
+-o workspace/critic1.out.md
 
 # -------------------------------------------------------------------------------
 # 4 · Language & style polish  →  redraft                                       //
@@ -62,7 +61,7 @@
 -a workspace/critic1.out.md
 -t prompts/editor.md
 --ai --ai-model gpt-4o
--o redraft.out.md
+-o workspace/redraft.out.md
 
 # -------------------------------------------------------------------------------
 # 5 · Final critique after polish  →  critic2                                   //
@@ -71,7 +70,7 @@
 -a workspace/redraft.out.md
 -t prompts/critic.md
 --ai --ai-model gpt-4o
--o critic2.out.md
+-o workspace/critic2.out.md
 -E to_critic=$redraft
 
 # -------------------------------------------------------------------------------
@@ -80,6 +79,6 @@
 [final]
 -a workspace/critic2.out.md
 -h -R                                     # add absolute path banner for traceability
--o final_report.md
+-o workspace/final_report.md
 
 
