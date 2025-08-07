@@ -897,7 +897,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     g_ai.add_argument(
         "--ai-temperature", type=float, metavar="NUM",
-        help="Sampling temperature for non‑o3 models (range 0–2).",
+        help="Sampling temperature for non‑o* (like o3 o4-mini) models (range 0–2).",
     )
     g_ai.add_argument(
         "--ai-top-p", type=float, metavar="NUM",
@@ -1302,7 +1302,7 @@ def _call_openai(  # pragma: no cover
     messages.append({"role": "user", "content": prompt})
 
     params: Dict[str, object] = {"model": model, "messages": messages, "timeout": timeout}
-    if not model.lower().startswith("o3"):
+    if not model.lower().startswith("o"):
         if temperature is not None:
             params["temperature"] = temperature
         if top_p is not None:
