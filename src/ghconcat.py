@@ -76,6 +76,7 @@ _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 # Pattern used to wipe any “# line 1…” when the first line must be dropped.
 _LINE1_RE: re.Pattern[str] = re.compile(r"^\s*#\s*line\s*1\d*\s*$")
+_WORKSPACES_SEEN: set[Path] = set()
 
 # This cache is *per GhConcat.run()*; it is cleared on each public entry call.
 _SEEN_FILES: set[str] = set()
@@ -345,7 +346,7 @@ _LIST_ATTRS: Set[str] = {
 _BOOL_ATTRS: Set[str] = {
     "rm_simple", "rm_all", "rm_import", "rm_export",
     "keep_blank", "list_only", "absolute_path", "skip_headers",
-    "keep_header", "disable_url_domain_only"
+    "keep_header", "disable_url_domain_only", "preserve_cache"
 }
 _STR_ATTRS: Set[str] = {
     "workdir", "workspace", "template", "wrap_lang",
@@ -1114,6 +1115,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # ── miscellaneous ─────────────────────────────────────────────────────────
     g_misc.add_argument(
+        "--preserve-cache",
+        action="store_true",
+        help="Keep the .ghconcat_*cache directories after finishing the run.",
+    )
+    g_misc.add_argument(
         "--upgrade", action="store_true",
         help="Self‑update ghconcat from the official GAHEOS repository into ~/.bin.",
     )
@@ -1824,6 +1830,7 @@ def _execute_node(
         _resolve_path(parent_workspace or root, ns_effective.workspace)
         if ns_effective.workspace else root
     )
+    _WORKSPACES_SEEN.add(workspace)
 
     ns_effective.workspace = str(workspace)  # freeze as absolute path
     if not root.exists():
@@ -1898,23 +1905,6 @@ def _execute_node(
 
         # 4.4 Unión + filtro post-descarga
         files = [*local_files, *remote_files, *scraped_files, *git_files]
-
-        if ns_effective.git_exclude:
-            excl_specs = _split_list(ns_effective.git_exclude)
-
-            def _skip(fp: Path) -> bool:
-                s = str(fp)
-                for spec in excl_specs:
-                    # dir/ → coincidencia por prefijo
-                    if spec.endswith("/") and spec[:-1] in s:
-                        if s.endswith(spec[:-1]) or f"{spec[:-1]}/" in s:
-                            return True
-                    # archivo o sufijo → coincidencia por sufijo
-                    if s.endswith(spec):
-                        return True
-                return False
-
-            files = [fp for fp in files if not _skip(fp)]
 
         # 4.5 Concatenación + wrapping opcional
         if files:
@@ -2080,6 +2070,23 @@ def _perform_upgrade() -> None:  # pragma: no cover
     sys.exit(0)
 
 
+def _purge_caches() -> None:
+    """
+    Borra todos los «.ghconcat_*cache» vistos durante la ejecución
+    (git + URL scraper) salvo que la sesión pidiera conservarlos.
+    """
+    patterns = (".ghconcat_gitcache", ".ghconcat_urlcache")
+    for ws in _WORKSPACES_SEEN:
+        for pat in patterns:
+            tgt = ws / pat
+            if tgt.exists():
+                try:
+                    shutil.rmtree(tgt, ignore_errors=True)
+                    logger.info(f"🗑  cache removed → {tgt}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"⚠  could not delete {tgt}: {exc}")
+
+
 # ────────────────────────────  Public API  ──────────────────────────────────
 class GhConcat:
     """
@@ -2147,6 +2154,9 @@ class GhConcat:
 
             _, dump = _execute_node(root, None)
             outputs.append(dump)
+
+        if "--preserve-cache" not in argv:
+            _purge_caches()
 
         return "".join(outputs)
 

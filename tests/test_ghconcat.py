@@ -903,10 +903,10 @@ class GitRepositoryTests(GhConcatBaseTest):
         dump = _run([
             "-h",
             "-s", ".py",
-            "-g", self.REPO_URL,
-            "-G", f"{self.REPO_URL}^dev/__init__.py",
+            "-g", f'{self.REPO_URL}^dev',
+            "-G", f"{self.REPO_URL}^dev/tests/test_ghconcat.py",
         ])
-        self.assertNotInDump("__init__.py", dump)
+        self.assertNotInDump("test_ghconcat.py", dump)
         # Some other .py still present (e.g. tools/build_fixtures.py)
         self.assertRegex(dump, r"build_fixtures\.py", msg="other files should remain")
 
