@@ -847,6 +847,109 @@ class StdoutBehaviourTests(GhConcatBaseTest):
 
 
 # --------------------------------------------------------------------------- #
+# 23. Git‑repository inclusion (‑g / ‑G)                                      #
+# --------------------------------------------------------------------------- #
+class GitRepositoryTests(GhConcatBaseTest):
+    """
+    Functional tests for the new -g / -G flags.
+
+    The tests clone the public «GAHEOS/ghconcat» repository inside the
+    workspace’s ``.ghconcat_gitcache`` directory and verify:
+
+    1. Full‑repository inclusion via -g.
+    2. Exclusion of specific paths via -G.
+    3. Sub‑path and branch handling.
+    """
+
+    REPO_URL = "https://github.com/GAHEOS/ghconcat"
+
+    # ---------- helpers ---------- #
+    @classmethod
+    def setUpClass(cls):
+        """
+        Quickly check whether the remote repository is reachable.
+        If the git command fails (e.g. no network) the whole class is skipped.
+        """
+        try:
+            subprocess.check_call(
+                ["git", "ls-remote", cls.REPO_URL],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+            )
+        except Exception:  # noqa: BLE001
+            raise unittest.SkipTest("git network unavailable or repo down")
+
+    # ---------- tests ---------- #
+    def test_clone_and_include_all_py(self) -> None:
+        """
+        -g <repo> with «-s .py» must concatenate **all** Python files of the
+        default branch, including the top‑level *ghconcat.py*.
+        """
+        dump = _run([
+            "-h",
+            "-s", ".py",
+            "-g", self.REPO_URL,
+        ])
+        self.assertInDump("ghconcat.py", dump)
+        self.assertGreaterEqual(dump.count(HEADER_DELIM), 3,
+                                "expected several .py files from the repo")
+
+    def test_exclude_specific_file_with_G(self) -> None:
+        """
+        «-G <repo>/ghconcat.py» must remove *only* that file, leaving the rest
+        of the repository intact.
+        """
+        dump = _run([
+            "-h",
+            "-s", ".py",
+            "-g", self.REPO_URL,
+            "-G", f"{self.REPO_URL}^dev/__init__.py",
+        ])
+        self.assertNotInDump("__init__.py", dump)
+        # Some other .py still present (e.g. tools/build_fixtures.py)
+        self.assertRegex(dump, r"build_fixtures\.py", msg="other files should remain")
+
+    def test_subpath_only(self) -> None:
+        """
+        Using a «/SUBPATH» suffix should restrict discovery to that subtree.
+        """
+        dump = _run([
+            "-h",
+            "-s", ".py",
+            "-g", f"{self.REPO_URL}^dev/src/__init__.py",
+        ])
+        # Only the targeted file appears
+        self.assertInDump("__init__.py", dump)
+        self.assertEqual(dump.count(HEADER_DELIM), 2,
+                         "only one header banner expected (one file)")
+
+    def test_specific_branch(self) -> None:
+        """
+        If the repo exposes a «dev» branch, cloning with «^dev» must succeed.
+        The test falls back to skipping if the branch does not exist.
+        """
+        branch = "main"
+        try:
+            subprocess.check_call(
+                ["git", "ls-remote", "--exit-code", "--heads",
+                 self.REPO_URL, branch],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+            )
+        except subprocess.CalledProcessError:
+            self.skipTest(f"branch '{branch}' not found in upstream repo")
+
+        dump = _run([
+            "-h",
+            "-s", ".py",
+            "-g", f"{self.REPO_URL}^{branch}",
+        ])
+        self.assertInDump("ghconcat.py", dump)  # file in dev branch
+
+
+# --------------------------------------------------------------------------- #
 #  Utility for writing small template files                                   #
 # --------------------------------------------------------------------------- #
 def _write(path: Path, body: str, *, encoding: str = "utf-8") -> None:

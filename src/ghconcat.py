@@ -33,7 +33,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib
 from copy import deepcopy
+from hashlib import sha1
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import logging
@@ -318,6 +320,7 @@ _ENV_REF: re.Pattern[str] = re.compile(r"\$([a-zA-Z_][\w\-]*)")
 _VALUE_FLAGS: Set[str] = {
     "-w", "--workdir", "-W", "--workspace",
     "-a", "--add-path", "-A", "--exclude-path",
+    "-g", "--git-path", "-G", "--git-exclude",
     "-f", "--url",
     "-F", "--url-scrape",
     "-d", "--url-scrape-depth",
@@ -337,7 +340,7 @@ _INT_ATTRS: Set[str] = {
 _LIST_ATTRS: Set[str] = {
     "add_path", "exclude_path", "suffix", "exclude_suf",
     "hdr_flags", "path_flags", "blank_flags", "first_flags",
-    "urls", "url_scrape",
+    "urls", "url_scrape", "git_path", "git_exclude"
 }
 _BOOL_ATTRS: Set[str] = {
     "rm_simple", "rm_all", "rm_import", "rm_export",
@@ -355,6 +358,7 @@ _FLT_ATTRS: Set[str] = {
     "ai_frequency_penalty",
 }
 _NON_INHERITED: Set[str] = {"output", "unwrap", "ai"}
+_GIT_CLONES: Dict[Tuple[str, str | None], Path] = {}
 
 
 # ───────────────────────────────  Data classes  ─────────────────────────────
@@ -513,6 +517,182 @@ def _html_to_text(src: str) -> str:
         # Si el parser falla (HTML muy roto) → fallback regex
         return re.sub(r"[ \t]+\n", "\n",
                       _TAG_RE.sub(" ", src)).strip()
+
+
+def _git_cache_root(workspace: Path) -> Path:
+    """
+    Return the directory that stores shallow clones of remote repositories,
+    creating it if it does not yet exist.
+    """
+    root = workspace / ".ghconcat_gitcache"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _parse_git_spec(spec: str) -> Tuple[str, Optional[str], Optional[str]]:
+    """
+    Parse a `-g / -G` SPEC and return **(repo_url, branch, sub_path)**.
+
+    • `repo_url`  – Canonical URL for `git clone` (guaranteed to end in `.git`).
+    • `branch`    – Specified branch or *None* for the default branch.
+    • `sub_path`  – File/dir inside the repo, relative (no leading slash) or *None*.
+
+    The syntax accepted is::
+
+        URL[ ^BRANCH ][ /SUBPATH ]
+
+    Examples
+    --------
+    >>> _parse_git_spec("git@github.com:GAHEOS/ghconcat")
+    ('git@github.com:GAHEOS/ghconcat.git', None, None)
+
+    >>> _parse_git_spec("https://github.com/org/repo^dev/src")
+    ('https://github.com/org/repo.git', 'dev', 'src')
+    """
+    # 1) Branch split
+    if "^" in spec:
+        url_part, tail = spec.split("^", 1)
+        if "/" in tail:
+            branch, sub_path = tail.split("/", 1)
+        else:
+            branch, sub_path = tail, None
+    else:
+        url_part, branch, sub_path = spec, None, None
+
+    # 2) Extract sub‑path when no ^BRANCH was given
+    if sub_path is None:
+        if url_part.startswith("http"):
+            parsed = urllib.parse.urlparse(url_part)
+            segs = parsed.path.lstrip("/").split("/")
+            if len(segs) > 2:  # /owner/repo/[…]
+                sub_path = "/".join(segs[2:])
+                url_part = parsed._replace(
+                    path="/" + "/".join(segs[:2])
+                ).geturl()
+        elif url_part.startswith("git@"):
+            host, path = url_part.split(":", 1)
+            segs = path.split("/")
+            if len(segs) > 2:
+                sub_path = "/".join(segs[2:])
+                url_part = f"{host}:{'/'.join(segs[:2])}"
+
+    # 3) Ensure .git suffix for HTTPS; git@ usually already works without it.
+    if url_part.startswith("http") and not url_part.endswith(".git"):
+        url_part += ".git"
+
+    return url_part, branch, sub_path
+
+
+def _clone_git_repo(repo_url: str, branch: Optional[str], cache_root: Path) -> Path:
+    """
+    Clone *repo_url* (shallow) into *cache_root* unless an identical copy
+    already exists.  Returns the path to the checked‑out work‑tree.
+    """
+    key = (repo_url, branch)
+    if key in _GIT_CLONES:  # Re‑use clone inside the same ghconcat run
+        return _GIT_CLONES[key]
+
+    digest = sha1(f"{repo_url}@{branch or 'HEAD'}".encode()).hexdigest()[:12]
+    dst = cache_root / digest
+
+    if not dst.exists():  # First time – do the network fetch
+        try:
+            cmd = ["git", "clone", "--depth", "1"]
+            if branch:
+                cmd += ["--branch", branch, "--single-branch"]
+            cmd += [repo_url, str(dst)]
+            subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info(f"✔ cloned {repo_url} ({branch or 'default'}) → {dst}")
+        except Exception as exc:  # noqa: BLE001
+            _fatal(f"could not clone {repo_url}: {exc}")
+
+    _GIT_CLONES[key] = dst
+    return dst
+
+
+def _collect_git_files(
+        git_specs: List[str] | None,
+        git_exclude_specs: List[str] | None,
+        workspace: Path,
+        suffixes: List[str],
+        exclude_suf: List[str],
+) -> List[Path]:
+    """
+    Resolve every “-g / -G” SPEC into concrete filesystem paths.
+
+    • NO archivo dentro de «.git/» se incluye jamás.
+    • El directorio «.ghconcat_gitcache» *no* se considera “oculto” para
+      esta rutina: sólo se descartan hijos que empiecen por «.git» o «.».
+
+    The algorithm replicates (ligeramente simplificado) la lógica de
+    `_gather_files`, pero sin el filtro global `_hidden()` que eliminaba
+    el repositorio entero por vivir bajo «.ghconcat_gitcache».
+    """
+    if not git_specs:
+        return []
+
+    # ── 1. Preparación ───────────────────────────────────────────────────
+    cache_root = _git_cache_root(workspace)
+    include_roots: list[Path] = []
+    exclude_roots: list[Path] = []
+
+    # suffix →  “.py”  (garantiza punto al inicio)
+    incl_suf = {s if s.startswith(".") else f".{s}" for s in suffixes}
+    excl_suf = {s if s.startswith(".") else f".{s}" for s in exclude_suf} - incl_suf
+
+    # ── 2. Clonado / path-resolution ─────────────────────────────────────
+    for spec in git_specs:
+        repo, branch, sub = _parse_git_spec(spec)
+        root = _clone_git_repo(repo, branch, cache_root)
+        include_roots.append(root / sub if sub else root)
+
+    for spec in git_exclude_specs or []:
+        repo, branch, sub = _parse_git_spec(spec)
+        root = _clone_git_repo(repo, branch, cache_root)
+        exclude_roots.append(root / sub if sub else root)
+
+    excl_files = {p.resolve() for p in exclude_roots if p.is_file()}
+    excl_dirs = {p.resolve() for p in exclude_roots if p.is_dir()}
+
+    # ── 3. Recorrido manual ──────────────────────────────────────────────
+    collected: set[Path] = set()
+
+    def _skip_suffix(p: Path) -> bool:
+        if incl_suf and not any(p.name.endswith(s) for s in incl_suf):
+            return True
+        if any(p.name.endswith(s) for s in excl_suf):
+            return True
+        return False
+
+    for root in include_roots:
+        if not root.exists():
+            logger.warning(f"⚠  {root} does not exist – skipped")
+            continue
+
+        if root.is_file():
+            if root.resolve() not in excl_files and not _skip_suffix(root):
+                collected.add(root.resolve())
+            continue
+
+        for dirpath, dirnames, filenames in os.walk(root):
+            # descarta sub-árboles excluidos por «-G»
+            dirnames[:] = [
+                d for d in dirnames
+                if (Path(dirpath, d).resolve() not in excl_dirs)
+                   and d != ".git"  # nunca entrar al repo interno
+            ]
+
+            for fn in filenames:
+                fp = Path(dirpath, fn)
+                if fp.suffix in {".pyc", ".pyo"}:  # binarios Python
+                    continue
+                if fp.resolve() in excl_files:
+                    continue
+                if _skip_suffix(fp):
+                    continue
+                collected.add(fp.resolve())
+
+    return sorted(collected, key=str)
 
 
 def _parse_directive_file(path: Path) -> DirNode:
@@ -727,6 +907,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "Allow the scraper (‑F) to follow links *outside* the seed’s scheme+host.  "
             "Without this flag, ghconcat remains confined to the original domain."
         ),
+    )
+    g_loc.add_argument(
+        "-g", "--git-path", metavar="SPEC", action="append", dest="git_path",
+        help=(
+            "Include sources from a remote *Git* repository.  "
+            "SPEC → URL[^BRANCH][/SUBPATH].  If BRANCH is omitted the default "
+            "branch is used; if SUBPATH is omitted the whole repository is scanned."
+        ),
+    )
+    g_loc.add_argument(
+        "-G", "--git-exclude", metavar="SPEC", action="append", dest="git_exclude",
+        help="Exclude a file or subtree inside a repository previously added with -g.",
     )
     g_loc.add_argument(
         "-s", "--suffix", metavar="SUF", action="append", dest="suffix",
@@ -1649,7 +1841,12 @@ def _execute_node(
 
     # ── 4. Concatenación bruta (local + remoto) ────────────────────────────
     dump_raw = ""
-    if ns_effective.add_path or ns_effective.urls or ns_effective.url_scrape:
+    if (
+            ns_effective.add_path
+            or ns_effective.git_path  # ← NUEVO
+            or ns_effective.urls
+            or ns_effective.url_scrape
+    ):
         suffixes = _split_list(ns_effective.suffix)
         exclude_suf = _split_list(ns_effective.exclude_suf)
 
@@ -1668,6 +1865,15 @@ def _execute_node(
                 suffixes=suffixes,
                 exclude_suf=exclude_suf,
             )
+
+        # 4.1‑bis Repositorios Git (-g / -G)
+        git_files: List[Path] = _collect_git_files(
+            ns_effective.git_path,
+            ns_effective.git_exclude,
+            workspace,
+            suffixes,
+            exclude_suf,
+        )
 
         # 4.2 Descarga puntual (-f/--url)
         remote_files: List[Path] = []
@@ -1691,7 +1897,24 @@ def _execute_node(
             )
 
         # 4.4 Unión + filtro post-descarga
-        files = [*local_files, *remote_files, *scraped_files]
+        files = [*local_files, *remote_files, *scraped_files, *git_files]
+
+        if ns_effective.git_exclude:
+            excl_specs = _split_list(ns_effective.git_exclude)
+
+            def _skip(fp: Path) -> bool:
+                s = str(fp)
+                for spec in excl_specs:
+                    # dir/ → coincidencia por prefijo
+                    if spec.endswith("/") and spec[:-1] in s:
+                        if s.endswith(spec[:-1]) or f"{spec[:-1]}/" in s:
+                            return True
+                    # archivo o sufijo → coincidencia por sufijo
+                    if s.endswith(spec):
+                        return True
+                return False
+
+            files = [fp for fp in files if not _skip(fp)]
 
         # 4.5 Concatenación + wrapping opcional
         if files:
