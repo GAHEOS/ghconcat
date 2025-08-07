@@ -325,7 +325,7 @@ ghconcat -g git@github.com:GAHEOS/ghconcat^dev/src/ghconcat.py -s .py
 ## 12 · Recipes
 
 <details>
-<summary>11.1 Diff‑friendly dump for code‑review</summary>
+<summary>12.1 Diff‑friendly dump for code‑review</summary>
 
 ```bash
 # main branch
@@ -340,7 +340,7 @@ diff -u /tmp/base.txt /tmp/head.txt | less -R
 </details>
 
 <details>
-<summary>11.2 “Source‑of‑truth” Markdown</summary>
+<summary>12.2 “Source‑of‑truth” Markdown</summary>
 
 ```bash
 ghconcat -s .js -s .dart -C -i -a lib -a web \
@@ -351,7 +351,7 @@ ghconcat -s .js -s .dart -C -i -a lib -a web \
 </details>
 
 <details>
-<summary>11.3 Context pipeline with AI post‑processing</summary>
+<summary>12.3 Context pipeline with AI post‑processing</summary>
 
 ```gctx
 [concat]
@@ -381,7 +381,7 @@ ghconcat -x pipeline.gctx
 </details>
 
 <details>
-<summary>11.4 Remote + local bundle</summary>
+<summary>12.4 Remote + local bundle</summary>
 
 ```bash
 ghconcat -a src -s .py \
@@ -393,7 +393,7 @@ ghconcat -a src -s .py \
 </details>
 
 <details>
-<summary>11.5 Large‑scale academic literature synthesis pipeline 📚🤖 (one‑shot `‑x`)</summary>
+<summary>12.5 Large‑scale academic literature synthesis pipeline 📚🤖 (one‑shot `‑x`)</summary>
 
 > This recipe demonstrates how **one single directive file** orchestrates an end‑to‑end scholarly workflow powered by
 > multiple LLM “personas”.
