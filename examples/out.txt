@@ -1,0 +1,175 @@
+# =============================================================================
+#  ghconcat pipeline – Odoo 17 "gaheos_vet_clinic"
+# =============================================================================
+
+# 0 · Functional spec                             → {spec}
+[spec]
+-w .
+-a docs/spec_vet_clinic.md
+-o workspace/spec.txt
+-u spec-md
+
+# 1 · Senior Dev asks IA for full addon           → {senior_code}
+[senior_code]
+-a workspace/spec.txt
+-E module_name="gaheos_vet_clinic"
+-u markdown
+-t prompts/senior.md
+--ai --ai-model o3
+-o workspace/senior_module.md
+
+# 2 · QA reviews the generated addon              → {qa_feedback}
+[qa_feedback]
+-a workspace/senior_module.md
+-t prompts/qa.md
+--ai --ai-model gpt-4o
+-o workspace/qa_feedback.md
+
+# 3 · Senior Dev refines code per QA              → {revised_code}
+[addon_code]
+-a workspace/senior_module.md
+-a workspace/qa_feedback.md
+-t prompts/senior_revision.md
+--ai --ai-model gpt-4o
+-o workspace/revised_module.md
+
+# 4 · Tester writes initial unit tests            → {tests_v1}
+[tests_v1]
+-a workspace/revised_module.md
+-t prompts/tester.md
+--ai --ai-model gpt-4o
+-o workspace/tests_v1.md
+
+# 5 · QA revises the tests                        → {qa_tests}
+[qa_tests]
+-a workspace/tests_v1.md
+-t prompts/qa_tests.md
+--ai --ai-model gpt-4o
+-o workspace/qa_tests_feedback.md
+
+# 6 · Tester improves tests                       → {tests_v2}
+[tests_v2]
+-a workspace/tests_v1.md
+-a workspace/qa_tests_feedback.md
+-t prompts/tester_improve.md
+--ai --ai-model gpt-4o
+-o workspace/tests_v2.md
+
+# 7 · Bundle final addon + tests                  → artefact + STDOUT
+[final]
+-a workspace/revised_module.md
+-a workspace/tests_v2.md
+-h -R
+-o final/gaheos_vet_clinic_bundle.md
+# Functional Spec – gaheos_vet_clinic
+
+## Purpose
+
+Minimal veterinary management addon for Odoo 17 aimed at small clinics.
+
+## Data model
+
+| Model            | Fields                                                                                                                                  | Notes                     |
+|------------------|-----------------------------------------------------------------------------------------------------------------------------------------|---------------------------|
+| gaheos.vet.owner | `name: Char` **required**<br>`phone: Char`<br>`email: Char`                                                                             | Basic owner info          |
+| gaheos.vet.pet   | `name: Char` **required**<br>`owner_id: Many2one('gaheos.vet.owner')`<br>`species: Selection('dog','cat','other')`<br>`birthdate: Date` | One owner → many pets     |
+| gaheos.vet.visit | `pet_id: Many2one('gaheos.vet.pet')`<br>`visit_date: Datetime` (default *now*)<br>`weight: Float`<br>`notes: Text`                      | Basic consultation record |
+
+## Business rules
+
+1. Deleting an owner must cascade to pets and visits (`ondelete='cascade'`).
+2. Visits of the future are not allowed.
+3. Only users in group **`group_vet_user`** can create/write visits; unlink reserved to **`group_vet_manager`**.
+
+## Minimal UI (out of scope for code generation)
+
+* List views for owners, pets and visits.
+## Role
+QA Engineer focused on Odoo technical quality.
+
+## Task
+Audit the addon for: security, performance, docstrings, compliance with spec.
+
+### Deliverable
+Markdown table: **File · Severity (High/Med/Low) · Issue · Recommendation**  
+Finish with overall verdict ✅ or ❌.
+
+### Code to audit
+{senior_code}
+## Role
+QA Engineer.
+
+## Task
+Review the tests, list gaps or false positives (table format).
+
+### Code to review
+{tests_v1}
+
+## Role
+You are a **Senior Odoo Developer**.  
+Generate a small, production‑ready addon for Odoo 17 named `{module_name}`.
+
+## Functional spec
+{spec}
+
+## Requirements
+* Full addon: manifest, models, security (CSV), init files.
+* Python code PEP 8 + type hints + English docstrings.
+* One model per table described, plus any helper mixins you need.
+* Enforce Rule 2 (no future visits) at model level.
+* Provide demo data only if strictly necessary.
+
+## Output format
+For each file emit:
+
+\===== addons/{module\_name}/<path>/<file> =====
+
+```python
+# file content
+```
+
+One fenced block per file, no commentary outside.
+## Role
+Senior Developer.
+
+## Task
+Refactor the addon to fix every High/Medium issue reported.
+
+### Functional spec
+{spec}
+
+### QA findings
+{qa_feedback}
+
+### Odoo Addon Code
+{senior_code}
+
+### Output
+Re‑emit the full addon in the same file‑per‑block format.
+## Role
+Odoo Tester.
+
+## Task
+Write unit tests for 100% coverage of business logic and ACLs using
+`odoo.tests.TransactionCase`.
+
+### Output
+One fenced block per test file under `tests/`.
+
+### Code to test
+{addon_code}
+## Role
+
+Tester.
+
+## Task
+
+Apply QA feedback, deliver improved tests (replace previous).
+
+### QA feedback
+
+{qa_tests}
+
+### Tests to improve
+
+{tests_v1}
