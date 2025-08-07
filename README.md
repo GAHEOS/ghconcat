@@ -17,9 +17,11 @@ Typical use‑cases:
 
 ```bash
 # 1 ─ Local + remote: dump .py + .xml under addons/ & web/, ALSO scrape
-#     https://gaheos.com two levels deep, Markdown‑wrap, send to OpenAI:
+#     https://gaheos.com two levels deep **AND** a single file from GitHub,
+#     Markdown-wrap, send to OpenAI:
 ghconcat -s .py -s .xml -C -i -n 120 \
          -a addons -a web \
+         -g https://github.com/GAHEOS/ghconcat^dev/src/ghconcat.py \
          -F https://gaheos.com -d 2 \
          -u markdown \
          -t ai/prompt.tpl \
@@ -145,52 +147,54 @@ ghconcat --help
 
 ## 5 · CLI Reference
 
-| Category                | Flag(s) (short / long form)          | Detailed purpose                                                                                                                                                    |
-|-------------------------|--------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Location**            | `-w DIR`, `--workdir DIR`            | Root directory where content files are discovered. All relative paths in the current context are resolved from here.                                                |
-|                         | `-W DIR`, `--workspace DIR`          | Folder that stores templates, prompts and outputs; defaults to *workdir* if omitted.                                                                                |
-| **Discovery**           | `-a PATH`, `--add-path PATH`         | Add a file **or** directory (recursively) to the inclusion set. Repeatable.                                                                                         |
-|                         | `-A PATH`, `--exclude-path PATH`     | Exclude an entire directory tree even if it was added by a broader `-a`. Repeatable.                                                                                |
-|                         | `-s SUF`, `--suffix SUF`             | Whitelist extension(s) (e.g. `.py`). At least one `-s` turns the suffix filter into “allow-only”. Repeatable.                                                       |
-|                         | `-S SUF`, `--exclude-suffix SUF`     | Blacklist extension(s) regardless of origin (local or remote). Repeatable.                                                                                          |
-|                         | `-f URL`, `--url URL`                | *Fetch* a single remote resource and cache it as a local file (name preserved or inferred from *Content-Type*). Repeatable.                                         |
-|                         | `-F URL`, `--url-scrape URL`         | Depth-limited crawler starting at each seed URL; downloads every linked resource that passes active suffix / exclusion rules. Repeatable.                           |
-|                         | `-d N`, `--url-scrape-depth N`       | Maximum recursion depth for `-F` (default **2**; `0` = seed page only).                                                                                             |
-|                         | `-D`, `--disable-same-domain`        | Lift same-host restriction when scraping; external domains are followed.                                                                                            |
-| **Line slicing**        | `-n NUM`, `--total-lines NUM`        | Keep at most `NUM` lines per file *after* header adjustment.                                                                                                        |
-|                         | `-N LINE`, `--start-line LINE`       | Start concatenation at 1-based line `LINE` (can be combined with `-n`).                                                                                             |
-|                         | `-m`, `--keep-first-line`            | Always keep the original first line even if slicing starts after it.                                                                                                |
-|                         | `-M`, `--no-first-line`              | Force-drop the original first line, overriding an inherited `-m`.                                                                                                   |
-| **Clean-up**            | `-c`, `--remove-comments`            | Remove *inline* comments only (language-aware).                                                                                                                     |
-|                         | `-C`, `--remove-all-comments`        | Remove both inline **and** full-line comments.                                                                                                                      |
-|                         | `-i`, `--remove-import`              | Strip `import` / `require` / `use` statements (Python, JS, Dart, …).                                                                                                |
-|                         | `-I`, `--remove-export`              | Strip `export` / `module.exports` declarations (JS, TS, …).                                                                                                         |
-|                         | `-b`, `--strip-blank`                | Delete blank lines left after cleaning.                                                                                                                             |
-|                         | `-B`, `--keep-blank`                 | Preserve blank lines (overrides an inherited `-b`).                                                                                                                 |
-| **Templating & output** | `-t FILE`, `--template FILE`         | Render the raw dump through a Jinja-lite template. Placeholders are expanded afterwards.                                                                            |
-|                         | `-o FILE`, `--output FILE`           | Write the final result to disk; path is resolved against *workspace*.                                                                                               |
-|                         | `-u LANG`, `--wrap LANG`             | Wrap each file body in a fenced code-block using `LANG` as info-string.                                                                                             |
-|                         | `-U`, `--no-wrap`                    | Cancel an inherited wrap in a child context.                                                                                                                        |
-|                         | `-h`, `--header`                     | Emit heavy banner headers (`===== path =====`) the first time each file appears.                                                                                    |
-|                         | `-H`, `--no-headers`                 | Suppress headers in the current context.                                                                                                                            |
-|                         | `-r`, `--relative-path`              | Show header paths relative to *workdir* (default).                                                                                                                  |
-|                         | `-R`, `--absolute-path`              | Show header paths as absolute file-system paths.                                                                                                                    |
-|                         | `-l`, `--list`                       | *List mode*: print only discovered file paths, one per line.                                                                                                        |
-|                         | `-L`, `--no-list`                    | Disable an inherited list mode.                                                                                                                                     |
-|                         | `-e VAR=VAL`, `--env VAR=VAL`        | Define a **local** variable visible only in the current context. Repeatable.                                                                                        |
-|                         | `-E VAR=VAL`, `--global-env VAR=VAL` | Define a **global** variable inherited by descendant contexts. Repeatable.                                                                                          |
-| **STDOUT control**      | `-O`, `--stdout`                     | Always duplicate the final output to STDOUT, even when `-o` is present. When `-o` is absent at the root context, streaming to STDOUT already happens automatically. |
-| **AI bridge**           | `--ai`                               | Send the rendered text to OpenAI Chat; reply is written to `-o` (or a temp file) and exposed as `{_ia_ctx}` for templates.                                          |
-|                         | `--ai-model NAME`                    | Select chat model (default **o3**).                                                                                                                                 |
-|                         | `--ai-temperature F`                 | Sampling temperature (ignored for *o3*).                                                                                                                            |
-|                         | `--ai-top-p F`                       | Top-p nucleus sampling value.                                                                                                                                       |
-|                         | `--ai-presence-penalty F`            | Presence-penalty parameter.                                                                                                                                         |
-|                         | `--ai-frequency-penalty F`           | Frequency-penalty parameter.                                                                                                                                        |
-|                         | `--ai-system-prompt FILE`            | System prompt file (placeholder-aware).                                                                                                                             |
-|                         | `--ai-seeds FILE`                    | JSONL seed messages to prime the chat.                                                                                                                              |
-| **Batch / contexts**    | `-x FILE`, `--directives FILE`       | Execute a directive file containing `[context]` blocks. Each `-x` starts an isolated environment. Repeatable.                                                       |
-| **Miscellaneous**       | `--upgrade`                          | Self-update *ghconcat* from the official repository into `~/.bin`.                                                                                                  |
-|                         | `--help`                             | Show integrated help and exit.                                                                                                                                      |
+| Category                | Flag(s) (short / long form)                                   | Detailed purpose                                                                                                                                                    |
+|-------------------------|---------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Location**            | `-w DIR`, `--workdir DIR`                                     | Root directory where content files are discovered. All relative paths in the current context are resolved from here.                                                |
+|                         | `-W DIR`, `--workspace DIR`                                   | Folder that stores templates, prompts and outputs; defaults to *workdir* if omitted.                                                                                |
+| **Discovery**           | `-a PATH`, `--add-path PATH`                                  | Add a file **or** directory (recursively) to the inclusion set. Repeatable.                                                                                         |
+|                         | `-A PATH`, `--exclude-path PATH`                              | Exclude an entire directory tree even if it was added by a broader `-a`. Repeatable.                                                                                |
+|                         | `-s SUF`, `--suffix SUF`                                      | Whitelist extension(s) (e.g. `.py`). At least one `-s` turns the suffix filter into “allow-only”. Repeatable.                                                       |
+|                         | `-S SUF`, `--exclude-suffix SUF`                              | Blacklist extension(s) regardless of origin (local or remote). Repeatable.                                                                                          |
+|                         | `-f URL`, `--url URL`                                         | *Fetch* a single remote resource and cache it as a local file (name preserved or inferred from *Content-Type*). Repeatable.                                         |
+|                         | `-F URL`, `--url-scrape URL`                                  | Depth-limited crawler starting at each seed URL; downloads every linked resource that passes active suffix / exclusion rules. Repeatable.                           |
+|                         | `-g SPEC`, `--git-path SPEC` `SPEC = URL[^BRANCH][/SUBPATH]`. | **Include sources from a remote *Git* repo**. If *BRANCH* is omitted, default branch is used; if *SUBPATH* is omitted the whole repo is scanned.                    |                                                                                                                 
+|                         | `-G SPEC`, `--git-exclude SPEC`                               | Exclude *file* or *subtree* inside a repo previously added with `-g`.                                                                                               |
+|                         | `-d N`, `--url-scrape-depth N`                                | Maximum recursion depth for `-F` (default **2**; `0` = seed page only).                                                                                             |
+|                         | `-D`, `--disable-same-domain`                                 | Lift same-host restriction when scraping; external domains are followed.                                                                                            |
+| **Line slicing**        | `-n NUM`, `--total-lines NUM`                                 | Keep at most `NUM` lines per file *after* header adjustment.                                                                                                        |
+|                         | `-N LINE`, `--start-line LINE`                                | Start concatenation at 1-based line `LINE` (can be combined with `-n`).                                                                                             |
+|                         | `-m`, `--keep-first-line`                                     | Always keep the original first line even if slicing starts after it.                                                                                                |
+|                         | `-M`, `--no-first-line`                                       | Force-drop the original first line, overriding an inherited `-m`.                                                                                                   |
+| **Clean-up**            | `-c`, `--remove-comments`                                     | Remove *inline* comments only (language-aware).                                                                                                                     |
+|                         | `-C`, `--remove-all-comments`                                 | Remove both inline **and** full-line comments.                                                                                                                      |
+|                         | `-i`, `--remove-import`                                       | Strip `import` / `require` / `use` statements (Python, JS, Dart, …).                                                                                                |
+|                         | `-I`, `--remove-export`                                       | Strip `export` / `module.exports` declarations (JS, TS, …).                                                                                                         |
+|                         | `-b`, `--strip-blank`                                         | Delete blank lines left after cleaning.                                                                                                                             |
+|                         | `-B`, `--keep-blank`                                          | Preserve blank lines (overrides an inherited `-b`).                                                                                                                 |
+| **Templating & output** | `-t FILE`, `--template FILE`                                  | Render the raw dump through a Jinja-lite template. Placeholders are expanded afterwards.                                                                            |
+|                         | `-o FILE`, `--output FILE`                                    | Write the final result to disk; path is resolved against *workspace*.                                                                                               |
+|                         | `-u LANG`, `--wrap LANG`                                      | Wrap each file body in a fenced code-block using `LANG` as info-string.                                                                                             |
+|                         | `-U`, `--no-wrap`                                             | Cancel an inherited wrap in a child context.                                                                                                                        |
+|                         | `-h`, `--header`                                              | Emit heavy banner headers (`===== path =====`) the first time each file appears.                                                                                    |
+|                         | `-H`, `--no-headers`                                          | Suppress headers in the current context.                                                                                                                            |
+|                         | `-r`, `--relative-path`                                       | Show header paths relative to *workdir* (default).                                                                                                                  |
+|                         | `-R`, `--absolute-path`                                       | Show header paths as absolute file-system paths.                                                                                                                    |
+|                         | `-l`, `--list`                                                | *List mode*: print only discovered file paths, one per line.                                                                                                        |
+|                         | `-L`, `--no-list`                                             | Disable an inherited list mode.                                                                                                                                     |
+|                         | `-e VAR=VAL`, `--env VAR=VAL`                                 | Define a **local** variable visible only in the current context. Repeatable.                                                                                        |
+|                         | `-E VAR=VAL`, `--global-env VAR=VAL`                          | Define a **global** variable inherited by descendant contexts. Repeatable.                                                                                          |
+| **STDOUT control**      | `-O`, `--stdout`                                              | Always duplicate the final output to STDOUT, even when `-o` is present. When `-o` is absent at the root context, streaming to STDOUT already happens automatically. |
+| **AI bridge**           | `--ai`                                                        | Send the rendered text to OpenAI Chat; reply is written to `-o` (or a temp file) and exposed as `{_ia_ctx}` for templates.                                          |
+|                         | `--ai-model NAME`                                             | Select chat model (default **o3**).                                                                                                                                 |
+|                         | `--ai-temperature F`                                          | Sampling temperature (ignored for *o3*).                                                                                                                            |
+|                         | `--ai-top-p F`                                                | Top-p nucleus sampling value.                                                                                                                                       |
+|                         | `--ai-presence-penalty F`                                     | Presence-penalty parameter.                                                                                                                                         |
+|                         | `--ai-frequency-penalty F`                                    | Frequency-penalty parameter.                                                                                                                                        |
+|                         | `--ai-system-prompt FILE`                                     | System prompt file (placeholder-aware).                                                                                                                             |
+|                         | `--ai-seeds FILE`                                             | JSONL seed messages to prime the chat.                                                                                                                              |
+| **Batch / contexts**    | `-x FILE`, `--directives FILE`                                | Execute a directive file containing `[context]` blocks. Each `-x` starts an isolated environment. Repeatable.                                                       |
+| **Miscellaneous**       | `--upgrade`                                                   | Self-update *ghconcat* from the official repository into `~/.bin`.                                                                                                  |
+|                         | `--help`                                                      | Show integrated help and exit.                                                                                                                                      |
 
 **Hints**
 
@@ -285,7 +289,7 @@ In templates, escape braces with `{{`/`}}` to print a literal `{}`.
 
 ---
 
-## 11 · Remote URL Ingestion & Scraping
+## 11 · Remote URL & **Git** Ingestion
 
 | Flag     | Behaviour                                                                               |
 |----------|-----------------------------------------------------------------------------------------|
@@ -294,6 +298,28 @@ In templates, escape braces with `{{`/`}}` to print a literal `{}`.
 | `-d N`   | Maximum depth (default 2, `0` = no links).                                              |
 | `-D`     | Follow links across domains.                                                            |
 | Logs     | `✔ fetched …` / `✔ scraped … (d=N)` messages on **stderr**. Silence with `2>/dev/null`. |
+
+### 11.1 · Remote **Git** repositories (`-g` / `-G`)
+
+| Flag      | Behaviour                                                               |
+|-----------|-------------------------------------------------------------------------|
+| `-g SPEC` | Shallow-clones the repo into `.ghconcat_gitcache/` (one per SPEC) and   |
+|           | adds every file that matches suffix filters. `SPEC` syntax:             |
+|           | `URL[^BRANCH][/SUBPATH]` (examples below).                              |
+| `-G SPEC` | Excludes a file or directory inside any repo previously added with `-g` |
+
+**Examples**
+
+```bash
+# Whole repo, default branch:
+ghconcat -g https://github.com/pallets/flask.git -s .py
+
+# Only docs/ directory from main:
+ghconcat -g https://github.com/pallets/flask/docs -s .rst
+
+# Single file on a dev branch:
+ghconcat -g git@github.com:GAHEOS/ghconcat^dev/src/ghconcat.py -s .py
+```
 
 ## 12 · Recipes
 
@@ -523,13 +549,16 @@ Improve the draft below by:
 
 Return a revised outline with inline comments where changes were made.
 
-### Web-research background 
+### Web-research background
+
 {source}
 
 ### Junior Notes
+
 {notes}
 
 ### Draft Outline
+
 {junior}
 ```
 
@@ -564,9 +593,11 @@ Rewrite the document for clarity, concision and formal academic tone.
 Fix passive‑voice overuse, tighten sentences, and ensure IEEE reference style.
 
 ## Critique Summary
+
 {critic1}
 
 ## Revised Document
+
 Source (critically reviewed):
 {senior}
 ```
@@ -676,14 +707,15 @@ Happy researching!
 
 ## 13 · Troubleshooting
 
-| Symptom                | Hint                                                     |
-|------------------------|----------------------------------------------------------|
-| Empty dump             | Verify `‑a` paths and suffix filters.                    |
-| ChatGPT timeout        | Check network, quota or prompt size (> 128 k tokens?).   |
-| `{var}` unresolved     | Define with `‑e`/`‑E` or ensure context alias exists.    |
-| Duplicate headers      | Don’t mix `‑h` and header lines inside custom templates. |
-| Imports still present  | Use `‑i` and/or `‑I` appropriate for the language.       |
-| Too many fetched files | Tighten `-s`/`-S` filters or reduce `-d`.                |
+| Symptom                | Hint                                                            |
+|------------------------|-----------------------------------------------------------------|
+| Empty dump             | Verify `‑a` paths and suffix filters.                           |
+| ChatGPT timeout        | Check network, quota or prompt size (> 128 k tokens?).          |
+| `{var}` unresolved     | Define with `‑e`/`‑E` or ensure context alias exists.           |
+| Duplicate headers      | Don’t mix `‑h` and header lines inside custom templates.        |
+| Imports still present  | Use `‑i` and/or `‑I` appropriate for the language.              |
+| Too many fetched files | Tighten `-s`/`-S` filters or reduce `-d`.                       |
+| Stale Git clone        | Delete `.ghconcat_gitcache` or run with `--preserve-cache` off. |
 
 ---
 
