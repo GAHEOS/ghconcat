@@ -951,6 +951,78 @@ class GitRepositoryTests(GhConcatBaseTest):
 
 
 # --------------------------------------------------------------------------- #
+#  X. Replace / Preserve (-y / -Y)                                            #
+# --------------------------------------------------------------------------- #
+class ReplacePreserveTests(GhConcatBaseTest):
+    """Validate the text-substitution engine introduced by -y / -Y."""
+
+    # ---------- util ---------- #
+    def _make_txt(self, name: str, content: str) -> Path:
+        """
+        Create *name* under test-fixtures/tmp/ with *content* and return its Path.
+        The helper ensures the directory exists and always uses UTF-8.
+        """
+        path = FIXTURES / "tmp" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    # ---------- tests ---------- #
+    def test_delete_simple_global(self) -> None:
+        """
+        «/foo//gi» debe eliminar **todas** las variantes “foo” (case-insensitive).
+        """
+        fp = self._make_txt("g_del.txt", "foo FOO foo")
+        dump = _run(["-s", ".txt", "-a", str(fp), "-y", "/foo//gi"])
+        # Ninguna ocurrencia de “foo” en minúsculas
+        self.assertNotInDump("foo", dump.lower())
+
+    def test_replace_first_only(self) -> None:
+        """
+        Sin flag «g» ⇒ sólo la *primera* ocurrencia se reemplaza.
+        """
+        fp = self._make_txt("first_only.txt", "foo bar foo")
+        dump = _run(["-s", ".txt", "-a", str(fp), "-y", "/foo/baz/"])
+        self.assertEqual(dump.count("baz"), 1)  # sólo una sustitución
+        self.assertEqual(dump.count("foo"), 1)  # queda la segunda “foo”
+
+    def test_replace_with_preserve(self) -> None:
+        """
+        «-Y /foo bar/» protege ese segmento de la regla destructiva «-y /foo//g».
+        Resultado esperado:
+        · Se mantiene “foo bar”.
+        · Desaparece el segundo “foo”.
+        """
+        fp = self._make_txt("preserve.txt", "foo bar foo")
+        dump = _run([
+            "-s", ".txt",
+            "-a", str(fp),
+            "-y", "/foo//g",
+            "-Y", "/foo bar/",
+        ])
+        self.assertInDump("foo bar", dump)
+        self.assertEqual(dump.count("foo"), 1)  # sólo el del segmento preservado
+
+    def test_invalid_regex_ignored(self) -> None:
+        """
+        Un patrón inválido (p.ej. '/[/') debe registrarse como warning y ser ignorado.
+        El contenido permanece intacto.
+        """
+        fp = self._make_txt("invalid_regex.txt", "hello world")
+        dump = _run(["-s", ".txt", "-a", str(fp), "-y", "/[/"])
+        self.assertInDump("hello world", dump)
+
+    def test_case_insensitive_flag(self) -> None:
+        """
+        Combinación «gi» ⇒ reemplazo global, sin distinguir mayúsculas/minúsculas.
+        """
+        fp = self._make_txt("case_flag.txt", "Foo foo FOO")
+        dump = _run(["-s", ".txt", "-a", str(fp), "-y", "/foo/bar/gi"])
+        self.assertNotInDump("foo", dump.lower())
+        self.assertEqual(dump.lower().count("bar"), 3)
+
+
+# --------------------------------------------------------------------------- #
 #  Utility for writing small template files                                   #
 # --------------------------------------------------------------------------- #
 def _write(path: Path, body: str, *, encoding: str = "utf-8") -> None:

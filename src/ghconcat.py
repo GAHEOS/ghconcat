@@ -333,6 +333,7 @@ _VALUE_FLAGS: Set[str] = {
     "--ai-seeds", "--ai-temperature", "--ai-top-p",
     "--ai-presence-penalty", "--ai-frequency-penalty",
     "-e", "--env", "-E", "--global-env",
+    "-y", "--replace", "-Y", "--preserve",
 }
 _INT_ATTRS: Set[str] = {
     "total_lines", "first_line",
@@ -341,7 +342,8 @@ _INT_ATTRS: Set[str] = {
 _LIST_ATTRS: Set[str] = {
     "add_path", "exclude_path", "suffix", "exclude_suf",
     "hdr_flags", "path_flags", "blank_flags", "first_flags",
-    "urls", "url_scrape", "git_path", "git_exclude"
+    "urls", "url_scrape", "git_path", "git_exclude",
+    "replace_rules", "preserve_rules",
 }
 _BOOL_ATTRS: Set[str] = {
     "rm_simple", "rm_all", "rm_import", "rm_export",
@@ -360,6 +362,7 @@ _FLT_ATTRS: Set[str] = {
 }
 _NON_INHERITED: Set[str] = {"output", "unwrap", "ai"}
 _GIT_CLONES: Dict[Tuple[str, str | None], Path] = {}
+_RE_DELIM: str = "/"
 
 
 # ───────────────────────────────  Data classes  ─────────────────────────────
@@ -706,6 +709,138 @@ def _collect_git_files(
     return sorted(collected, key=str)
 
 
+def _parse_replace_spec(spec: str) -> tuple[re.Pattern[str], str, bool] | None:
+    """
+    Parse a *-y / -Y* SPEC and return a tuple *(regex, replacement, global_flag)*.
+
+    Examples
+    --------
+    * `/foo/`           → delete  (replacement = '')           , global = True
+    * `/foo/bar/gi`     → replace, IGNORECASE + global
+    * '/path\\/to/--/'  → pattern = r'path/to', replacement='--'
+
+    Returns *None* if the SPEC is syntactically invalid or the regex
+    cannot be compiled.  Any error is logged at WARNING level and ignored,
+    as mandated by the requirements.
+    """
+    # Strip optional outer quotes (single or double)
+    if (spec.startswith(("'", '"')) and spec.endswith(spec[0])):
+        spec = spec[1:-1]
+
+    if not spec.startswith(_RE_DELIM):
+        logger.warning(f"⚠  invalid replace spec (missing leading /): {spec!r}")
+        return None
+
+    # ── 1. Split spec into parts, honouring backslash escapes ────────────
+    parts: list[str] = []
+    buf: list[str] = []
+    escaped = False
+    for ch in spec[1:]:  # skip first delimiter
+        if escaped:
+            buf.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == _RE_DELIM:  # unescaped delimiter  →  new part
+            parts.append("".join(buf))
+            buf = []
+            continue
+        buf.append(ch)
+    parts.append("".join(buf))  # tail (flags or empty)
+
+    if len(parts) not in {2, 3}:  # pattern / [replacement] / [flags]
+        logger.warning(f"⚠  invalid replace spec: {spec!r}")
+        return None
+
+    pattern_src = parts[0]
+    replacement = "" if len(parts) == 2 else parts[1]
+    flags_src = parts[-1] if len(parts) == 3 else "g"
+
+    # ── 2. Build re flags + global switch ────────────────────────────────
+    re_flags = 0
+    global_sub = "g" in flags_src
+    if "i" in flags_src:
+        re_flags |= re.IGNORECASE
+    if "m" in flags_src:
+        re_flags |= re.MULTILINE
+    if "s" in flags_src:
+        re_flags |= re.DOTALL
+
+    try:
+        regex = re.compile(pattern_src, flags=re_flags)
+    except re.error as exc:
+        logger.warning(f"⚠  invalid regex in spec {spec!r}: {exc}")
+        return None
+
+    return regex, replacement, global_sub
+
+
+def _apply_replacements(
+        text: str,
+        replace_specs: Sequence[str] | None,
+        preserve_specs: Sequence[str] | None,
+) -> str:
+    """
+    Apply *replace_specs* to *text* while protecting regions matched by
+    *preserve_specs*.  Preserved regions are temporarily swapped out with
+    sentinel tokens and restored after all substitutions.
+
+    Parameters
+    ----------
+    text:
+        Original input text.
+    replace_specs / preserve_specs:
+        Sequences of raw SPEC strings exactly as provided on the CLI.
+
+    Returns
+    -------
+    str
+        The transformed text.
+    """
+    if not replace_specs:
+        return text
+
+    # ── 1. Compile rules (ignore invalid ones) ───────────────────────────
+    replace_rules: list[tuple[re.Pattern[str], str, bool]] = []
+    for spec in replace_specs:
+        parsed = _parse_replace_spec(spec)
+        if parsed:
+            replace_rules.append(parsed)
+
+    preserve_rules: list[re.Pattern[str]] = []
+    for spec in preserve_specs or []:
+        parsed = _parse_replace_spec(spec)
+        if parsed:
+            preserve_rules.append(parsed[0])  # only regex part needed
+
+    if not replace_rules:
+        return text
+
+    # ── 2. Shield preserved regions  -------------------------------------
+    placeholders: dict[str, str] = {}
+
+    def _shield(match: re.Match[str]) -> str:
+        token = f"\x00GHPRS{len(placeholders)}\x00"
+        placeholders[token] = match.group(0)
+        return token
+
+    for rx in preserve_rules:
+        text = rx.sub(_shield, text)
+
+    # ── 3. Apply replacements  -------------------------------------------
+    for rx, repl, is_global in replace_rules:
+        count = 0 if is_global else 1
+        text = rx.sub(repl, text, count=count)
+
+    # ── 4. Restore preserved regions  ------------------------------------
+    for token, original in placeholders.items():
+        text = text.replace(token, original)
+
+    return text
+
+
 def _parse_directive_file(path: Path) -> DirNode:
     """
     Build a `DirNode` tree out of the *path* directive file.
@@ -848,6 +983,7 @@ def _build_parser() -> argparse.ArgumentParser:
     g_loc = p.add_argument_group("Discovery")
     g_rng = p.add_argument_group("Line slicing")
     g_cln = p.add_argument_group("Cleaning")
+    g_sub = p.add_argument_group("Substitution")
     g_tpl = p.add_argument_group("Template & output")
     g_ai = p.add_argument_group("AI integration")
     g_misc = p.add_argument_group("Miscellaneous")
@@ -974,6 +1110,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "-M", "--no-first-line", dest="first_flags",
         action="append_const", const="drop",
         help="Force‑drop the first physical line regardless of other slicing flags.",
+    )
+    g_sub.add_argument(
+        "-y", "--replace", metavar="SPEC", action="append",
+        dest="replace_rules",
+        help=(
+            "Delete or substitute *text fragments* that match SPEC.  The syntax is "
+            "strictly `/pattern/`    → delete matches, or\n"
+            "         `/patt/repl/flags` where flags ∈ {g,i,m,s}.  Delimiter is `/` "
+            "and may be escaped inside the pattern/replacement with `\\/`.  The "
+            "pattern is a Python‑style regex.  Invalid patterns are logged and "
+            "silently ignored."
+        ),
+    )
+    g_sub.add_argument(
+        "-Y", "--preserve", metavar="SPEC", action="append",
+        dest="preserve_rules",
+        help=(
+            "Regex exceptions for `-y`.  Any region matched by a PRESERVE rule is "
+            "temporarily shielded from the replace engine and restored afterwards.  "
+            "Same delimiter, escaping and flag rules as `-y`."
+        ),
     )
 
     # ── cleaning ──────────────────────────────────────────────────────────────
@@ -1326,26 +1483,17 @@ def _clean(
 
 # ─────────────────────────────  Concatenation  ──────────────────────────────
 def _concat_files(
-        files: List[Path],
+        files: list[Path],
         ns: argparse.Namespace,
         *,
         header_root: Path,
-        wrapped: Optional[List[Tuple[str, str]]] = None,
+        wrapped: Optional[list[tuple[str, str]]] = None,
 ) -> str:
     """
-    Concatenate *files* applying cleaning, headers and optional wrapping.
+    Concatenate *files* applying cleaning, headers, optional wrapping and the
+    new replace/preserve engine.
     """
-    parts: List[str] = []
-    comment_prefix = {
-        ".py": "# ",
-        ".js": "// ",
-        ".dart": "// ",
-        ".go": "// ",
-        ".yml": "# ",
-        ".yaml": "# ",
-        ".xml": "<!-- ",
-        ".csv": "# ",
-    }
+    parts: list[str] = []
 
     for idx, fp in enumerate(files):
         ext = fp.suffix.lower()
@@ -1377,12 +1525,20 @@ def _concat_files(
 
         hdr_path = str(fp) if ns.absolute_path else os.path.relpath(fp, header_root)
 
-        # Traditional header (if “‑h”)
+        # Banner header
         if not ns.skip_headers and hdr_path not in _SEEN_FILES:
             parts.append(f"{HEADER_DELIM}{hdr_path} {HEADER_DELIM}\n")
             _SEEN_FILES.add(hdr_path)
 
         body = "".join(body_lines)
+
+        # ── REPLACEMENT ENGINE (nuevo) ────────────────────────────────────
+        body = _apply_replacements(
+            body,
+            getattr(ns, "replace_rules", None),
+            getattr(ns, "preserve_rules", None),
+        )
+
         parts.append(body)
 
         if wrapped is not None:
