@@ -75,6 +75,13 @@ except ModuleNotFoundError:  # pragma: no cover
     convert_from_path = None  # type: ignore
     pytesseract = None
 
+# ─────────────────────  Optional Excel import (lazy)  ──────────────────────
+try:
+    import pandas as _pd  # Excel reader (requires openpyxl | xlrd | pyxlsb)
+    import io  # stdlib – for in-memory TSV
+except ModuleNotFoundError:  # pragma: no cover
+    _pd = None  # type: ignore
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("ghconcat")
 
@@ -1247,22 +1254,67 @@ def _extract_pdf_text(
         return ""
 
 
+def _extract_excel_tsv(xls_path: Path) -> str:
+    """
+    Return a **tab-separated** textual dump of *every* sheet in *xls_path*.
+
+    The routine tries to keep dependencies optional:
+    • Requires `pandas` plus an Excel engine (openpyxl | xlrd | pyxlsb).
+    • Each sheet is prefixed by «===== <sheet name> =====».
+    • Empty cells become empty strings to preserve column alignment.
+    • On any failure the function logs an error and returns an empty string,
+      allowing ghconcat to continue gracefully.
+    """
+    if _pd is None:
+        logger.warning("✘ %s: install `pandas` to enable Excel support.", xls_path)
+        return ""
+
+    tsv_chunks: list[str] = []
+    try:
+        with _pd.ExcelFile(xls_path) as xls:
+            for sheet in xls.sheet_names:
+                try:
+                    df = xls.parse(sheet, dtype=str)  # all values as str
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("✘ %s: failed to parse sheet %s (%s).",
+                                 xls_path, sheet, exc)
+                    continue
+
+                buf = io.StringIO()
+                df.fillna("").to_csv(buf, sep="\t", index=False, header=True)
+                tsv_chunks.append(f"===== {sheet} =====\n{buf.getvalue().strip()}")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("✘ %s: failed to open Excel file (%s).", xls_path, exc)
+        return ""
+
+    return "\n\n".join(tsv_chunks)
+
+
 def _read_file_as_lines(fp: Path) -> list[str]:
     """
-    Devuelve *fp* en forma de lista de líneas **en texto**:
+    Return *fp* as a list of **text lines**:
 
-    · PDF → `_extract_pdf_text`.
-    · Resto → `read_text(utf-8, ignore)`.
-    · Binarios ilegibles → lista vacía (y log de aviso).
+    • PDF   → `_extract_pdf_text`
+    • Excel → `_extract_excel_tsv` (all sheets, TSV)
+    • Other → plain UTF-8 read with 'ignore' errors
+    • Binary/undecodable files are skipped (empty list, logged)
     """
-    if fp.suffix.lower() == ".pdf":
+    suf = fp.suffix.lower()
+
+    # ── PDF ────────────────────────────────────────────────────────────────
+    if suf == ".pdf":
         txt = _extract_pdf_text(fp)
+        return [ln + "\n" for ln in txt.splitlines()] if txt else []
+
+    # ── Excel (.xls / .xlsx) ───────────────────────────────────────────────
+    if suf in {".xls", ".xlsx"}:
+        txt = _extract_excel_tsv(fp)
         return [ln + "\n" for ln in txt.splitlines()] if txt else []
 
     try:
         return fp.read_text(encoding="utf-8", errors="ignore").splitlines(True)
     except UnicodeDecodeError:
-        logger.warning("✘ %s: archivo binario omitido.", fp)
+        logger.warning("✘ %s: binary or non-UTF-8 file skipped.", fp)
         return []
 
 

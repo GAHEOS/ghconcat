@@ -51,10 +51,10 @@ ghconcat -x conf/pipeline.gctx -o build/artifact.txt
 8. [Templating & Variables](#8--templating--variables)
 9. [AI Gateway](#9--ai-gateway)
 10. [Workspaces & Outputs](#10--workspaces--outputs)
-11. [Remote URL & Git Ingestion](#11--remote-url--git-ingestion)
-
-- [11.1 · Remote Git repositories (`-g` / `-G`)](#111--remote-git-repositories--g---g)
-
+11. [Advanced Parsing (PDFs, Remote URLs & Git Repos)](#11--advanced-parsing-pdfs-remote-urls--git-repos)
+    - 11.1 [Spreadsheet ingestion (.xls / .xlsx)](#111--spreadsheet-ingestion-xls--xlsx)
+    - 11.2 [Remote URL fetching & scraping (`-f` / `-F`)](#112--remote-git-repositories--g---g)
+    - 11.3 [Remote Git repositories (`-g` / `-G`)](#113--pdf-ingestion-pdf)
 12. [Recipes](#12--recipes)
 13. [Troubleshooting](#13--troubleshooting)
 14. [Environment & Exit Codes](#14--environment--exit-codes)
@@ -106,6 +106,8 @@ import/export pruning across a modern full‑stack code base.
 | `.yml` / `.yaml`      | `# …`                     | —                         | —                         |
 | `.css` / `.scss`      | `/* … */` & `// …` (SCSS) | —                         | —                         |
 | `.r`                  | `# …`                     | `library()`               | —                         |
+| `.xls`, `.xlsx`       | —                         | —                         | —                         |
+| `.pdf`                | —                         | —                         | —                         |
 
 ---
 
@@ -129,10 +131,14 @@ ghconcat --help
 
 ### 3.2 Optional extras
 
-| Feature            | Extra package        |
-|--------------------|----------------------|
-| OpenAI bridge      | `pip install openai` |
-| URL fetch/scrape\* | `urllib` (stdlib)    |
+| Feature                                 | Extra package(s) / toolchain                                          |
+|-----------------------------------------|-----------------------------------------------------------------------|
+| OpenAI bridge                           | `pip install openai`                                                  |
+| URL fetch/scrape\*                      | `urllib` (stdlib)                                                     |
+| PDF text extraction (.pdf)              | `pip install pypdf`                                                   |
+| OCR fallback for scanned PDFs           | `pip install pdf2image pytesseract`  + system **poppler** binaries    |
+| Fast & robust HTML stripping            | `pip install lxml`                                                    |
+| Excel workbook ingestion (.xls / .xlsx) | `pip install pandas openpyxl` *or* `pandas xlrd` *or* `pandas pyxlsb` |
 
 \* All networking relies on the Python standard library.
 
@@ -298,7 +304,25 @@ In templates, escape braces with `{{`/`}}` to print a literal `{}`.
 
 ---
 
-## 11 · Remote URL & **Git** Ingestion
+## 11 · Advanced Parsing (PDFs, Remote URLs & Git Repos)
+
+### 11.1 · Spreadsheet ingestion (.xls / .xlsx)
+
+`ghconcat` can read Microsoft Excel workbooks and convert every sheet into a **tab-separated** dump:
+
+* Each sheet starts with a banner header
+  `===== <sheet name> =====`
+* Empty cells become empty strings to keep column alignment.
+* The feature is **read-only**: your original workbook is never modified.
+* Dependencies: `pandas` **plus** one Excel engine (`openpyxl`, `xlrd` or `pyxlsb`).
+  If those packages are missing, the file is silently skipped and a warning is logged.
+
+#### Example
+
+```bash
+# Concatenate all .xlsx files under reports/ and strip blank lines
+ghconcat -s .xlsx -a reports -b -o tsv_bundle.txt
+```
 
 | Flag     | Behaviour                                                                               |
 |----------|-----------------------------------------------------------------------------------------|
@@ -308,7 +332,7 @@ In templates, escape braces with `{{`/`}}` to print a literal `{}`.
 | `-D`     | Follow links across domains.                                                            |
 | Logs     | `✔ fetched …` / `✔ scraped … (d=N)` messages on **stderr**. Silence with `2>/dev/null`. |
 
-### 11.1 · Remote **Git** repositories (`-g` / `-G`)
+### 11.2 · Remote **Git** repositories (`-g` / `-G`)
 
 | Flag      | Behaviour                                                               |
 |-----------|-------------------------------------------------------------------------|
@@ -329,6 +353,24 @@ ghconcat -g https://github.com/pallets/flask/docs -s .rst
 # Single file on a dev branch:
 ghconcat -g git@github.com:GAHEOS/ghconcat^dev/src/ghconcat.py -s .py
 ```
+
+### 11.3 · PDF ingestion (`.pdf`)
+
+`ghconcat` understands **PDF** files natively:
+
+* First tries embedded text extraction via `pypdf`.
+* If the file is text-empty *and* **pdf2image + pytesseract** are present, it falls back to page-level OCR (300 dpi by
+  default).
+* Each page is appended in reading order; headers show the original filename.
+* Works transparently with every cleaning, slicing and templating feature.
+
+> **Tip** Install extras only when you need OCR:  
+> `pip install pypdf pdf2image pytesseract`
+
+```bash
+# Concatenate all PDFs under docs/, strip blank lines and wrap in markdown fences
+ghconcat -s .pdf -a docs -b -u markdown -o manuals.md
+````
 
 ## 12 · Recipes
 

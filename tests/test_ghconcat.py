@@ -1076,7 +1076,64 @@ class PDFExtractionTests(GhConcatBaseTest):
         # Comprueba la cadena conocida dentro del cuerpo
         self.assertInDump("GAHEOS", dump)
 
+# --------------------------------------------------------------------------- #
+#  Excel extraction (.xls / .xlsx)                                            #
+# --------------------------------------------------------------------------- #
+class ExcelExtractionTests(GhConcatBaseTest):
+    """
+    Verifica que la extracción y conversión TSV de hojas Excel funciona
+    dentro del flujo normal de *ghconcat*.
 
+    · Se omite automáticamente si falta la librería `pandas`
+      (o un motor Excel válido) en el entorno de pruebas.
+    · El archivo de ejemplo se localiza en «tools/extra/sample.xlsx».
+    """
+
+    XLS_PATH = TOOLS_DIR / "extra" / "sample.xlsx"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Si pandas no está disponible se salta toda la clase.
+        try:
+            import pandas  # noqa: F401  # pylint: disable=unused-import
+        except ModuleNotFoundError:
+            raise unittest.SkipTest("pandas no instalado – se omite prueba Excel")
+
+        # Verifica que el archivo exista; en entornos CI puede faltar.
+        if not cls.XLS_PATH.exists():
+            raise unittest.SkipTest(f"{cls.XLS_PATH} no encontrado")
+
+    # ------------------------------------------------------------------ #
+    #  Pruebas                                                           #
+    # ------------------------------------------------------------------ #
+    def test_excel_tsv_is_concatenated(self) -> None:
+        """
+        Ejecuta ghconcat contra el Excel y comprueba que:
+
+        • El banner del archivo aparece en la salida.
+        • Se detecta al menos una cabecera «===== <sheet name> =====».
+        • El cuerpo contiene al menos un carácter TAB (‘\\t’),
+          señal de que la exportación TSV se realizó.
+        """
+        dump = _run([
+            "-s", ".xlsx,.xls",
+            "-a", str(self.XLS_PATH),
+            "-h",              # muestra banner de archivo
+        ])
+
+        # 1) El banner con el nombre del archivo debe estar presente.
+        self.assertInDump(self.XLS_PATH.name, dump)
+
+        # 2) Debe existir al menos la cabecera de la primera hoja
+        #    (por defecto suele llamarse “Sheet1”).
+        self.assertRegex(
+            dump,
+            r"Informe detallado",
+            msg="cabecera de hoja Excel no encontrada",
+        )
+
+        # 3) Al menos un tabulador indica que el TSV se generó.
+        self.assertInDump("\t", dump)
 # --------------------------------------------------------------------------- #
 #  Utility for writing small template files                                   #
 # --------------------------------------------------------------------------- #
