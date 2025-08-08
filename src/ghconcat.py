@@ -347,7 +347,7 @@ _VALUE_FLAGS: Set[str] = {
     "-D", "--disable-same-domain",
     "-s", "--suffix", "-S", "--exclude-suffix",
     "-n", "--total-lines", "-N", "--start-line",
-    "-t", "--template", "-o", "--output",
+    "-t", "--template", "-o", "--output", "-T", "--child-template",
     "-u", "--wrap", "--ai-model", "--ai-system-prompt",
     "--ai-seeds", "--ai-temperature", "--ai-top-p",
     "--ai-presence-penalty", "--ai-frequency-penalty",
@@ -370,7 +370,7 @@ _BOOL_ATTRS: Set[str] = {
     "keep_header", "disable_url_domain_only", "preserve_cache"
 }
 _STR_ATTRS: Set[str] = {
-    "workdir", "workspace", "template", "wrap_lang",
+    "workdir", "workspace", "template", "wrap_lang", "child_template",
     "ai_model", "ai_system_prompt", "ai_seeds",
 }
 _FLT_ATTRS: Set[str] = {
@@ -379,7 +379,7 @@ _FLT_ATTRS: Set[str] = {
     "ai_presence_penalty",
     "ai_frequency_penalty",
 }
-_NON_INHERITED: Set[str] = {"output", "unwrap", "ai"}
+_NON_INHERITED: Set[str] = {"output", "unwrap", "ai", "template"}
 _GIT_CLONES: Dict[Tuple[str, str | None], Path] = {}
 _RE_DELIM: str = "/"
 
@@ -606,9 +606,20 @@ def _build_parser() -> argparse.ArgumentParser:
     g_tpl.add_argument(
         "-t", "--template", metavar="FILE", dest="template",
         help=(
-            "Render the concatenation through a minimalist Jinja‑style template.  "
-            "Placeholders use single braces `{var}` and see per‑context variables, "
-            "`ghconcat_dump`, plus values set via ‑e/‑E."
+            "Render the current context through a minimalist Jinja-style template. "
+            "Placeholders use single braces `{var}` and see per-context variables, "
+            "`ghconcat_dump`, plus values set via -e/-E.  **Not inherited**."
+        ),
+    )
+    g_tpl.add_argument(
+        "-T", "--child-template", metavar="FILE", dest="child_template",
+        help=(
+            "Set a *default template for descendant contexts only*. Acts as if each "
+            "child had provided its own `-t FILE`. In a given context:\n"
+            "  • If both `-t` and `-T` are present, `-t` applies **locally** while "
+            "    `-T` updates the default for **subsequent contexts**.\n"
+            "  • A child may override the inherited `-T` by specifying its own `-t`, "
+            "    or replace it for its own descendants by providing a new `-T`."
         ),
     )
     g_tpl.add_argument(
@@ -2127,6 +2138,15 @@ def _execute_node(
 ) -> Tuple[Dict[str, str], str]:
     """
     Recursive executor.  Returns *(vars, final_output)* for *node*.
+
+    -T / --child-template semantics
+    -------------------------------
+    * `-t/--template` is LOCAL ONLY (not inherited).
+    * `-T/--child-template` is a default template for descendant contexts.
+      It does **not** affect the current context and can be superseded:
+        - a child can override the default with its own `-t`;
+        - providing `-T` in a context updates the default for *subsequent
+          contexts* (siblings), but not for the current one.
     """
     # ── 0. Herencia inicial de variables ───────────────────────────────────
     inherited_vars = inherited_vars or {}
@@ -2167,6 +2187,17 @@ def _execute_node(
     vars_local = {**inherited_for_children, **local_env_map}
     ctx_name = node.name
 
+    # ── 3.b Semántica -T: calcula fallback para *este* contexto y el valor para hijos
+    #     - parent_child_tpl: la plantilla por defecto heredada desde el padre.
+    #     - local_child_tpl:  la plantilla «-T» declarada en este contexto (si existe).
+    #     - child_tpl_for_descendants: lo que heredarán los *siguientes* contextos.
+    parent_child_tpl = getattr(ns_parent, "child_template", None) if ns_parent else None
+    local_child_tpl = getattr(ns_self, "child_template", None)
+    child_tpl_for_descendants = local_child_tpl if local_child_tpl not in (None, "") else parent_child_tpl
+
+    # Asegura que los *hijos* de este contexto vean el valor actualizado.
+    ns_effective.child_template = child_tpl_for_descendants  # ← NEW -T semantics
+
     # ── 4. Concatenación bruta (local + remoto) ────────────────────────────
     dump_raw = ""
     if (
@@ -2194,7 +2225,7 @@ def _execute_node(
                 exclude_suf=exclude_suf,
             )
 
-        # 4.1‑bis Repositorios Git (-g / -G)
+        # 4.1-bis Repositorios Git (-g / -G)
         git_files: List[Path] = _collect_git_files(
             ns_effective.git_path,
             ns_effective.git_exclude,
@@ -2255,7 +2286,7 @@ def _execute_node(
 
     # ── 6. Procesar hijos recursivamente ───────────────────────────────────
     for child in node.children:
-        # Cada hermano recibe TODA la info acumulada hasta el momento
+        # Ejecuta con el «child_template» acumulado hasta ahora
         child_vars, _ = _execute_node(
             child,
             ns_effective,
@@ -2268,12 +2299,27 @@ def _execute_node(
         vars_local.update(child_vars)
         inherited_for_children.update(child_vars)
 
+        # ← NEW -T semantics:
+        # Lee del hijo el «siguiente» valor de -T para los hermanos posteriores.
+        nxt = child_vars.get("__GH_NEXT_CHILD_TEMPLATE__", None)
+        if nxt is not None:
+            ns_effective.child_template = (nxt or None)
+
     _refresh_env_values(vars_local)
 
     # ── 7. Templating -------------------------------------------------------
     rendered = dump_raw
+    # Elegir plantilla efectiva PARA ESTE CONTEXTO:
+    #   1) -t local si existe;
+    #   2) si no, usar el -T heredado del PADRE (no el local recién puesto).
+    chosen_tpl = None
     if ns_effective.template:
-        tpl_path = _resolve_path(workspace, ns_effective.template)
+        chosen_tpl = ns_effective.template
+    elif parent_child_tpl:
+        chosen_tpl = parent_child_tpl  # ← fallback de -T heredado
+
+    if chosen_tpl:
+        tpl_path = _resolve_path(workspace, chosen_tpl)
         if not tpl_path.exists():
             _fatal(f"template {tpl_path} not found")
         rendered = _interpolate(
@@ -2349,10 +2395,9 @@ def _execute_node(
     force_stdout = getattr(ns_effective, "to_stdout", False)
     auto_root_stdout = (level == 0 and ns_effective.output in (None, TOK_NONE))
     if force_stdout or (auto_root_stdout and not force_stdout):
-        # cuando el resultado se está redirigiendo a un pipe/archivo
         if not sys.stdout.isatty():
             sys.stdout.write(final_out)
-        else:  # sesión interactiva
+        else:
             print(final_out, end="")
 
     # ── 10. Dump sintético raíz cuando procede -----------------------------
@@ -2360,6 +2405,10 @@ def _execute_node(
         final_out = "".join(gh_dump)
     if level == 0 and gh_dump is not None:
         vars_local["ghconcat_dump"] = "".join(gh_dump)
+
+    # ← NEW -T semantics: expone el «-T» que regirá para *próximos* contextos
+    # de este mismo nivel (hermanos). El padre lo leerá tras ejecutar el hijo.
+    vars_local["__GH_NEXT_CHILD_TEMPLATE__"] = child_tpl_for_descendants or ""
 
     return vars_local, final_out
 

@@ -1211,6 +1211,104 @@ class DeepEnvExpansionTests(GhConcatBaseTest):
         )
 
 
+# --------------------------------------------------------------------------- #
+# 28. Child-template (-T) semantics                                           #
+# --------------------------------------------------------------------------- #
+class ChildTemplateFlagTests(GhConcatBaseTest):
+    """
+    Validate -T / --child-template behaviour:
+      • -t is local-only; no inheritance.
+      • -T applies to descendants as a default -t.
+      • If a context sets both -t and -T, -t applies locally and -T becomes the
+        default for *subsequent* contexts (siblings).
+    """
+
+    def _mk_tpl(self, name: str, text: str) -> Path:
+        p = FIXTURES / "tmp" / "tpls"
+        p.mkdir(parents=True, exist_ok=True)
+        fp = p / name
+        fp.write_text(text, encoding="utf-8")
+        return fp
+
+    def test_T_applies_to_children_and_local_t_overrides(self) -> None:
+        """
+        Root sets:
+          • -t root.tpl  (renders final output)
+          • -T childA.tpl (default for children)
+        [one]  → no -t → uses childA.tpl
+        [two]  → -t childB.tpl and -T childC.tpl
+                  - two uses childB.tpl (local override)
+                  - childC.tpl becomes default for *subsequent* contexts
+        [three]→ no -t → uses childC.tpl
+        Root template prints placeholders {one} {two} {three} without re-wrapping,
+        because children already apply their own wrapping through -T.
+        """
+        # Root does NOT add brackets; children already return [A]/[B]/[C].
+        tpl_root = self._mk_tpl("root.tpl", "A={one} B={two} C={three}")
+        tpl_A = self._mk_tpl("childA.tpl", "[A]")
+        tpl_B = self._mk_tpl("childB.tpl", "[B]")
+        tpl_C = self._mk_tpl("childC.tpl", "[C]")
+
+        gctx = FIXTURES / "tmp" / "tpls" / "T_cascade.gctx"
+        gctx.write_text(f"""
+            -s .py
+            -a src/module/alpha.py
+            -t {tpl_root}
+            -T {tpl_A}
+
+            [one]
+            -s .py
+            -a src/module/alpha.py
+
+            [two]
+            -s .py
+            -a src/module/alpha.py
+            -t {tpl_B}
+            -T {tpl_C}
+
+            [three]
+            -s .py
+            -a src/module/alpha.py
+        """, encoding="utf-8")
+
+        dump = _run(["-x", str(gctx)])
+        self.assertInDump("A=[A]", dump)
+        self.assertInDump("B=[B]", dump)
+        self.assertInDump("C=[C]", dump)
+        # Extra guard: ensure there's no double-wrapping
+        self.assertNotInDump("A=[[A]]", dump)
+        self.assertNotInDump("B=[[B]]", dump)
+        self.assertNotInDump("C=[[C]]", dump)
+
+    def test_t_is_not_inherited_without_T(self) -> None:
+        """
+        Root uses -t only; children have no -t and no -T.
+        Expect: child placeholders expand to their *raw* body (no markers).
+        """
+        tpl_root = self._mk_tpl("root_only.tpl", "ONE={{one}} :: TWO={{two}} :: r={ghconcat_dump}\n{one}\n{two}")
+        # Nota: usamos {{one}} y {{two}} para mostrar literalmente '{one}' y '{two}'.
+
+        gctx = FIXTURES / "tmp" / "tpls" / "no_inherit_t.gctx"
+        gctx.write_text(f"""
+            -s .py
+            -a src/module/alpha.py
+            -t {tpl_root}
+
+            [one]
+            -s .py
+            -a src/module/alpha.py
+
+            [two]
+            -s .py
+            -a src/module/alpha.py
+        """, encoding="utf-8")
+
+        dump = _run(["-x", str(gctx)])
+        # Debe aparecer código de alpha.py, sin marcadores de child-templates.
+        self.assertInDump("def alpha", dump)
+        # Y los literales {{one}}/{{two}} deben preservarse como {one}/{two}.
+        self.assertInDump("ONE={one} :: TWO={two}", dump)
+
 
 # --------------------------------------------------------------------------- #
 #  Utility for writing small template files                                   #
