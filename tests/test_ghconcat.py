@@ -1076,6 +1076,7 @@ class PDFExtractionTests(GhConcatBaseTest):
         # Comprueba la cadena conocida dentro del cuerpo
         self.assertInDump("GAHEOS", dump)
 
+
 # --------------------------------------------------------------------------- #
 #  Excel extraction (.xls / .xlsx)                                            #
 # --------------------------------------------------------------------------- #
@@ -1118,7 +1119,7 @@ class ExcelExtractionTests(GhConcatBaseTest):
         dump = _run([
             "-s", ".xlsx,.xls",
             "-a", str(self.XLS_PATH),
-            "-h",              # muestra banner de archivo
+            "-h",  # muestra banner de archivo
         ])
 
         # 1) El banner con el nombre del archivo debe estar presente.
@@ -1134,6 +1135,83 @@ class ExcelExtractionTests(GhConcatBaseTest):
 
         # 3) Al menos un tabulador indica que el TSV se generó.
         self.assertInDump("\t", dump)
+
+
+# --------------------------------------------------------------------------- #
+# 27. Deep env interpolation for CLI flags (-w / -W)                          #
+# --------------------------------------------------------------------------- #
+class DeepEnvExpansionTests(GhConcatBaseTest):
+    """
+    Validate that variables defined with -E / -e, which reference other
+    variables, are fully resolved *before* they are used by CLI flags such
+    as -w (workdir) and -W (workspace).
+
+    The test ensures the following chain works:
+        PROJECT_ROOT  → SUPERAPP_ROOT=$PROJECT_ROOT/tmp
+        WORKSPACE_ROOT=$SUPERAPP_ROOT/<leaf>
+        -w $PROJECT_ROOT
+        -W $WORKSPACE_ROOT
+    """
+
+    def test_nested_global_env_expands_in_cli_flags(self) -> None:
+        """
+        Use only global env (-E). The workspace path is built from nested
+        variables and must exist *before* execution. The output file (-o)
+        must be created inside the resolved workspace directory.
+        """
+        # Prepare workspace under FIXTURES: <FIXTURES>/tmp/deep_ws_global
+        ws = FIXTURES / "tmp" / "deep_ws_global"
+        ws.mkdir(parents=True, exist_ok=True)
+
+        # Run ghconcat with nested -E vars and write a relative -o inside workspace
+        _ = _run([
+            "-E", f"PROJECT_ROOT={FIXTURES}",
+            "-E", "SUPERAPP_ROOT=$PROJECT_ROOT/tmp",
+            "-E", "WORKSPACE_ROOT=$SUPERAPP_ROOT/deep_ws_global",
+            "-w", "$PROJECT_ROOT",
+            "-W", "$WORKSPACE_ROOT",
+            "-s", ".py",
+            "-a", "src/module/alpha.py",
+            "-o", "out.txt",
+        ])
+
+        out_file = ws / "out.txt"
+        self.assertTrue(out_file.exists(), f"expected output at {out_file}")
+        self.assertIn(
+            "def alpha",
+            out_file.read_text(encoding="utf-8"),
+            "alpha.py body should be present in the workspace-scoped output",
+        )
+
+    def test_nested_local_env_expands_in_cli_flags_same_context(self) -> None:
+        """
+        Use only local env (-e). The nested expansion must occur within the
+        same context so that -w/-W receive fully expanded paths.
+        """
+        ws = FIXTURES / "tmp" / "deep_ws_local"
+        ws.mkdir(parents=True, exist_ok=True)
+
+        _ = _run([
+            "-e", "PROJECT_ROOT=.",
+            "-e", "SUPERAPP_ROOT=$PROJECT_ROOT/tmp",
+            "-e", "WORKSPACE_ROOT=$SUPERAPP_ROOT/deep_ws_local",
+            "-w", "$PROJECT_ROOT",
+            "-W", "$WORKSPACE_ROOT",
+            "-s", ".py",
+            "-a", "src/module/alpha.py",
+            "-o", "out2.txt",
+        ])
+
+        out_file = ws / "out2.txt"
+        self.assertTrue(out_file.exists(), f"expected output at {out_file}")
+        self.assertIn(
+            "def alpha",
+            out_file.read_text(encoding="utf-8"),
+            "alpha.py body should be present in the workspace-scoped output",
+        )
+
+
+
 # --------------------------------------------------------------------------- #
 #  Utility for writing small template files                                   #
 # --------------------------------------------------------------------------- #

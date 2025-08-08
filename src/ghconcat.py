@@ -1410,14 +1410,28 @@ def _collect_env_from_tokens(tokens: Sequence[str]) -> Dict[str, str]:
 
 def _expand_tokens(tokens: List[str], inherited_env: Dict[str, str]) -> List[str]:
     """
-    Perform a full expansion pass:
+    Expand a directive line in four steps:
 
-    1. Gather all env definitions on the line.
-    2. Substitute “$VAR”.
-    3. Strip any “none”‑disabled flags.
+    1) Collect raw assignments provided via -e/--env and -E/--global-env.
+    2) Resolve nested "$VAR" references among those assignments (deep interpolation).
+       This ensures that variables defined from other variables become fully
+       expanded *before* we touch the rest of the CLI tokens.
+    3) Substitute "$VAR" across all tokens, skipping the immediate value after
+       -e/-E so that the on-line definitions keep their literal text.
+    4) Remove any flag whose value is the literal "none" (case-insensitive).
     """
-    env_all = {**inherited_env, **_collect_env_from_tokens(tokens)}
-    return _strip_none(_substitute_env(tokens, env_all))
+    # Gather the raw env key-values present on the line plus inherited ones.
+    env_all: Dict[str, str] = {**inherited_env, **_collect_env_from_tokens(tokens)}
+
+    # NEW: make env values self-consistent (A uses B, B uses C, etc.) before
+    # applying them to other tokens like -w/-W/-a.
+    _refresh_env_values(env_all)
+
+    # Perform $VAR substitution on the tokens (except the value right after -e/-E).
+    expanded: List[str] = _substitute_env(tokens, env_all)
+
+    # Finally, honor "none" to drop a flag together with its value.
+    return _strip_none(expanded)
 
 
 def _refresh_env_values(env_map: Dict[str, str]) -> None:
