@@ -2085,6 +2085,12 @@ def _scrape_urls(
 def _merge_ns(parent: argparse.Namespace, child: argparse.Namespace) -> argparse.Namespace:
     """
     Return a **new** namespace = parent ⊕ child (child overrides, lists extend).
+
+    Important: this function does NOT resolve filesystem paths. Path resolution
+    (especially for -w/--workdir and -W/--workspace) is performed in
+    `_execute_node`, where we know the actual parent roots to correctly apply
+    the semantics (CWD for level 0, workdir-relative workspace at level 0, and
+    parent-root / parent-workspace for children).
     """
     merged = deepcopy(vars(parent))
     for key, val in vars(child).items():
@@ -2102,16 +2108,14 @@ def _merge_ns(parent: argparse.Namespace, child: argparse.Namespace) -> argparse
             merged[key] = val if val not in (None, "") else merged.get(key)
         else:
             merged[key] = val
-    if merged.get("workspace") and not Path(merged["workspace"]).is_absolute():
-        # hereda ruta relativa; conviértela a absoluta desde el parent
-        merged["workspace"] = str(
-            Path(parent.workspace).joinpath(merged["workspace"]).resolve()
-            if parent and getattr(parent, "workspace", None)
-            else Path(merged["workspace"]).resolve()
-        )
+
+    # Do NOT pre-resolve 'workspace' here. Let _execute_node do it
+    # with full context (cwd/root/workspace inheritance).
     ns = argparse.Namespace(**merged)
     _post_parse(ns)
     return ns
+
+
 
 
 # ─────────────────────────────  Core executor  ──────────────────────────────
@@ -2137,49 +2141,78 @@ def _execute_node(
         gh_dump: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, str], str]:
     """
-    Recursive executor.  Returns *(vars, final_output)* for *node*.
+    Recursive executor. Returns *(vars, final_output)* for *node*.
 
-    -T / --child-template semantics
-    -------------------------------
-    * `-t/--template` is LOCAL ONLY (not inherited).
-    * `-T/--child-template` is a default template for descendant contexts.
-      It does **not** affect the current context and can be superseded:
-        - a child can override the default with its own `-t`;
-        - providing `-T` in a context updates the default for *subsequent
-          contexts* (siblings), but not for the current one.
+    Workdir/workspace semantics (as requested):
+    - Level 0:
+        · -w is resolved against the process CWD (Path.cwd()).
+        · -W is resolved against the computed -w (workdir).
+        · If -w is omitted, it defaults to CWD.
+        · If only -W is provided, it is still resolved against -w (thus CWD).
+    - Children:
+        · If a child DOES NOT provide -w, it inherits the parent's root *as-is*
+          (no re-resolution). This prevents duplicate “…/dir/dir”.
+        · If a child provides -w, it is resolved against the parent's root.
+        · If a child provides -W, it is resolved against the parent's workspace
+          when available; otherwise it falls back to the current root.
+        · If a child omits -W, it inherits the parent's workspace unchanged.
     """
-    # ── 0. Herencia inicial de variables ───────────────────────────────────
     inherited_vars = inherited_vars or {}
     tokens = _expand_tokens(node.tokens, inherited_env=inherited_vars)
 
     ns_self = _build_parser().parse_args(tokens)
     _post_parse(ns_self)
 
-    # Namespace efectivo tras heredar del padre
+    # Effective namespace (values + flags); still no path resolution here.
     ns_effective = _merge_ns(ns_parent, ns_self) if ns_parent else ns_self
 
-    # ── 1. Init de raíz ────────────────────────────────────────────────────
+    # ── Root init at level 0 ──────────────────────────────────────────────
     if level == 0:
         gh_dump = []
         _SEEN_FILES.clear()
 
-    # ── 2. Resolución de workdir / workspace ───────────────────────────────
-    root_base = parent_root or Path.cwd()
-    root = _resolve_path(root_base, ns_effective.workdir or ".")
+    # ── Resolve workdir (root) with explicit-vs-inherited semantics ───────
+    if ns_parent is None:
+        # Level 0: -w against CWD (default '.')
+        base_for_root = Path.cwd()
+        root = _resolve_path(base_for_root, ns_effective.workdir or ".")
+    else:
+        # Child:
+        # If this context explicitly set -w, resolve it against the parent's root.
+        # Otherwise keep using the parent's root *as-is* (no re-resolution).
+        if ns_self.workdir not in (None, ""):
+            base_for_root = parent_root or Path.cwd()
+            root = _resolve_path(base_for_root, ns_self.workdir)
+        else:
+            root = parent_root or Path.cwd()
 
-    workspace = (
-        _resolve_path(parent_workspace or root, ns_effective.workspace)
-        if ns_effective.workspace else root
-    )
+    # ── Resolve workspace with the requested hierarchy ────────────────────
+    if ns_parent is None:
+        # Level 0:
+        if ns_self.workspace not in (None, ""):
+            # -W relative to computed root (-w)
+            workspace = _resolve_path(root, ns_self.workspace)
+        else:
+            workspace = root
+    else:
+        # Child:
+        if ns_self.workspace not in (None, ""):
+            # -W relative to parent workspace when available; otherwise to root
+            base_ws = parent_workspace or root
+            workspace = _resolve_path(base_ws, ns_self.workspace)
+        else:
+            # Inherit parent's workspace unchanged; or fallback to current root
+            workspace = parent_workspace or root
+
     _WORKSPACES_SEEN.add(workspace)
+    ns_effective.workspace = str(workspace)  # Freeze as absolute for this scope
 
-    ns_effective.workspace = str(workspace)  # freeze as absolute path
     if not root.exists():
         _fatal(f"--workdir {root} not found")
     if not workspace.exists():
         _fatal(f"--workspace {workspace} not found")
 
-    # ── 3. Ámbitos de variables ────────────────────────────────────────────
+    # ── Variable scopes ───────────────────────────────────────────────────
     global_env_map = _parse_env_items(ns_effective.global_env)
     local_env_map = _parse_env_items(ns_effective.env_vars)
 
@@ -2187,29 +2220,26 @@ def _execute_node(
     vars_local = {**inherited_for_children, **local_env_map}
     ctx_name = node.name
 
-    # ── 3.b Semántica -T: calcula fallback para *este* contexto y el valor para hijos
-    #     - parent_child_tpl: la plantilla por defecto heredada desde el padre.
-    #     - local_child_tpl:  la plantilla «-T» declarada en este contexto (si existe).
-    #     - child_tpl_for_descendants: lo que heredarán los *siguientes* contextos.
+    # ── Child-template (-T) propagation model ─────────────────────────────
     parent_child_tpl = getattr(ns_parent, "child_template", None) if ns_parent else None
     local_child_tpl = getattr(ns_self, "child_template", None)
-    child_tpl_for_descendants = local_child_tpl if local_child_tpl not in (None, "") else parent_child_tpl
+    child_tpl_for_descendants = (
+        local_child_tpl if local_child_tpl not in (None, "") else parent_child_tpl
+    )
+    ns_effective.child_template = child_tpl_for_descendants  # what children will see
 
-    # Asegura que los *hijos* de este contexto vean el valor actualizado.
-    ns_effective.child_template = child_tpl_for_descendants  # ← NEW -T semantics
-
-    # ── 4. Concatenación bruta (local + remoto) ────────────────────────────
+    # ── Raw concatenation (local + remote sources) ────────────────────────
     dump_raw = ""
     if (
-            ns_effective.add_path
-            or ns_effective.git_path  # ← NUEVO
-            or ns_effective.urls
-            or ns_effective.url_scrape
+        ns_effective.add_path
+        or ns_effective.git_path
+        or ns_effective.urls
+        or ns_effective.url_scrape
     ):
         suffixes = _split_list(ns_effective.suffix)
         exclude_suf = _split_list(ns_effective.exclude_suf)
 
-        # 4.1 Sistema de ficheros local
+        # 1) Local filesystem
         local_files: List[Path] = []
         if ns_effective.add_path:
             local_files = _gather_files(
@@ -2225,7 +2255,7 @@ def _execute_node(
                 exclude_suf=exclude_suf,
             )
 
-        # 4.1-bis Repositorios Git (-g / -G)
+        # 1-bis) Git repositories (-g / -G)
         git_files: List[Path] = _collect_git_files(
             ns_effective.git_path,
             ns_effective.git_exclude,
@@ -2234,17 +2264,17 @@ def _execute_node(
             exclude_suf,
         )
 
-        # 4.2 Descarga puntual (-f/--url)
+        # 2) Point downloads (-f/--url)
         remote_files: List[Path] = []
         if ns_effective.urls:
             remote_files = _fetch_urls(ns_effective.urls, workspace)
 
-        # 4.3 Scraping recursivo (-F/--url-scrape)
+        # 3) Recursive scraping (-F/--url-scrape)
         scraped_files: List[Path] = []
         if ns_effective.url_scrape:
             max_depth = (
                 2 if ns_effective.url_scrape_depth is None
-                else ns_effective.url_scrape_depth  # permite 0
+                else ns_effective.url_scrape_depth
             )
             scraped_files = _scrape_urls(
                 ns_effective.url_scrape,
@@ -2255,10 +2285,8 @@ def _execute_node(
                 same_host_only=not ns_effective.disable_url_domain_only,
             )
 
-        # 4.4 Unión + filtro post-descarga
         files = [*local_files, *remote_files, *scraped_files, *git_files]
 
-        # 4.5 Concatenación + wrapping opcional
         if files:
             wrapped: Optional[List[Tuple[str, str]]] = [] if ns_effective.wrap_lang else None
             dump_raw = _concat_files(
@@ -2275,7 +2303,7 @@ def _execute_node(
                     )
                 dump_raw = "".join(fenced)
 
-    # ── 5. Expose raw al espacio de variables ──────────────────────────────
+    # ── Expose raw to variables ───────────────────────────────────────────
     if ctx_name:
         vars_local[f"_r_{ctx_name}"] = dump_raw
         vars_local[ctx_name] = dump_raw
@@ -2284,9 +2312,8 @@ def _execute_node(
 
     _refresh_env_values(vars_local)
 
-    # ── 6. Procesar hijos recursivamente ───────────────────────────────────
+    # ── Recurse into children ─────────────────────────────────────────────
     for child in node.children:
-        # Ejecuta con el «child_template» acumulado hasta ahora
         child_vars, _ = _execute_node(
             child,
             ns_effective,
@@ -2299,25 +2326,15 @@ def _execute_node(
         vars_local.update(child_vars)
         inherited_for_children.update(child_vars)
 
-        # ← NEW -T semantics:
-        # Lee del hijo el «siguiente» valor de -T para los hermanos posteriores.
         nxt = child_vars.get("__GH_NEXT_CHILD_TEMPLATE__", None)
         if nxt is not None:
             ns_effective.child_template = (nxt or None)
 
     _refresh_env_values(vars_local)
 
-    # ── 7. Templating -------------------------------------------------------
+    # ── Templating (local -t, else parent -T) ─────────────────────────────
     rendered = dump_raw
-    # Elegir plantilla efectiva PARA ESTE CONTEXTO:
-    #   1) -t local si existe;
-    #   2) si no, usar el -T heredado del PADRE (no el local recién puesto).
-    chosen_tpl = None
-    if ns_effective.template:
-        chosen_tpl = ns_effective.template
-    elif parent_child_tpl:
-        chosen_tpl = parent_child_tpl  # ← fallback de -T heredado
-
+    chosen_tpl = ns_effective.template or parent_child_tpl
     if chosen_tpl:
         tpl_path = _resolve_path(workspace, chosen_tpl)
         if not tpl_path.exists():
@@ -2333,14 +2350,13 @@ def _execute_node(
 
     _refresh_env_values(vars_local)
 
-    # ── 8. Gateway AI (OpenAI) ---------------------------------------------
+    # ── AI gateway (optional) ─────────────────────────────────────────────
     final_out = rendered
     out_path: Optional[Path] = None
     if ns_effective.output and ns_effective.output.lower() != TOK_NONE:
         out_path = _resolve_path(workspace, ns_effective.output)
 
     if ns_effective.ai:
-        # Si no hay -o, crear tmpfile
         if out_path is None:
             tf = tempfile.NamedTemporaryFile(
                 delete=False, dir=workspace, suffix=".ai.txt"
@@ -2348,18 +2364,14 @@ def _execute_node(
             tf.close()
             out_path = Path(tf.name)
 
-        # System-prompt
         sys_prompt = ""
         if (ns_effective.ai_system_prompt
                 and ns_effective.ai_system_prompt.lower() != TOK_NONE):
             spath = _resolve_path(workspace, ns_effective.ai_system_prompt)
             if not spath.exists():
                 _fatal(f"system prompt {spath} not found")
-            sys_prompt = _interpolate(
-                spath.read_text(encoding="utf-8"), vars_local
-            )
+            sys_prompt = _interpolate(spath.read_text(encoding="utf-8"), vars_local)
 
-        # Seeds
         seeds = None
         if (ns_effective.ai_seeds
                 and ns_effective.ai_seeds.lower() != TOK_NONE):
@@ -2385,13 +2397,13 @@ def _execute_node(
 
     _refresh_env_values(vars_local)
 
-    # ── 9. Escritura a disco (si -o y sin AI) ------------------------------
+    # ── Write output (if -o and no AI) ────────────────────────────────────
     if out_path and not ns_effective.ai:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(final_out, encoding="utf-8")
         logger.info(f"✔ Output written → {out_path}")
 
-    # ── 9.b  Envío a STDOUT según reglas ------------------------------
+    # ── STDOUT forwarding rules ───────────────────────────────────────────
     force_stdout = getattr(ns_effective, "to_stdout", False)
     auto_root_stdout = (level == 0 and ns_effective.output in (None, TOK_NONE))
     if force_stdout or (auto_root_stdout and not force_stdout):
@@ -2400,14 +2412,13 @@ def _execute_node(
         else:
             print(final_out, end="")
 
-    # ── 10. Dump sintético raíz cuando procede -----------------------------
+    # ── Root dump fallback ────────────────────────────────────────────────
     if level == 0 and final_out == "" and gh_dump:
         final_out = "".join(gh_dump)
     if level == 0 and gh_dump is not None:
         vars_local["ghconcat_dump"] = "".join(gh_dump)
 
-    # ← NEW -T semantics: expone el «-T» que regirá para *próximos* contextos
-    # de este mismo nivel (hermanos). El padre lo leerá tras ejecutar el hijo.
+    # Expose -T for subsequent siblings at the same level
     vars_local["__GH_NEXT_CHILD_TEMPLATE__"] = child_tpl_for_descendants or ""
 
     return vars_local, final_out
