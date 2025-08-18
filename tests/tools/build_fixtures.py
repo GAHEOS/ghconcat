@@ -6,7 +6,6 @@ test-suite de ghconcat (GAHEOS v2).
 
 Idempotente y 100 % Python.
 """
-from __future__ import annotations
 
 import shutil
 import stat

@@ -1,0 +1,9 @@
+certifi>=2025.8.3     # CA bundle para evitar errores SSL con urllib
+lxml>=5.0.0           # HTML → texto (opcional)
+pypdf>=4.2.0          # Lectura de texto incrustado en PDF (opcional)
+pdf2image>=1.17.0     # Rasterizar PDF para OCR (requiere Poppler)
+Pillow>=10.0.0        # Dependencia de pdf2image
+pytesseract>=0.3.10   # OCR (requiere Tesseract)
+pandas>=2.2.0         # Excel → TSV (opcional)
+openpyxl>=3.1.2       # Motor de pandas para .xlsx
+openai>=1.30.0        # Integración IA (opcional)

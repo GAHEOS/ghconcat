@@ -9,7 +9,6 @@ Full functional test‑suite for *ghconcat* (spec v2 – 2025‑08‑05).
   self‑upgrade shortcut.
 • No legacy flags «‑X/‑O» are used; everything follows GAHEOS v2 semantics.
 """
-from __future__ import annotations
 
 import contextlib
 import os
@@ -42,6 +41,7 @@ TOOLS_DIR = Path(__file__).resolve().parent / "tools"
 FIXTURES = Path(__file__).resolve().parents[1] / "test-fixtures"
 BUILD_SCRIPT = TOOLS_DIR / "build_fixtures.py"
 os.environ["GHCONCAT_DISABLE_AI"] = "1"
+os.environ["GHCONCAT_INSECURE_TLS"] = "1"
 # Build the tree once at import‑time — it is fast (< 0.2s)
 subprocess.check_call([os.sys.executable, str(BUILD_SCRIPT)], stdout=subprocess.DEVNULL)
 
@@ -1308,6 +1308,107 @@ class ChildTemplateFlagTests(GhConcatBaseTest):
         self.assertInDump("def alpha", dump)
         # Y los literales {{one}}/{{two}} deben preservarse como {one}/{two}.
         self.assertInDump("ONE={one} :: TWO={two}", dump)
+
+
+class AIMaxTokensForwardingTests(unittest.TestCase):
+    """Validate that --ai-max-tokens is forwarded into _call_openai(max_tokens=...)."""
+
+    def test_ai_max_tokens_forwarded_to_call(self) -> None:
+        with patch.object(ghconcat, "_call_openai") as mocked, \
+                patch.dict(os.environ, {"OPENAI_API_KEY": "dummy", "GHCONCAT_DISABLE_AI": "0"}):
+            # Side-effect writes to out_path so the ghconcat pipeline can read it back.
+            mocked.side_effect = (
+                lambda prompt, out_path, **kwargs:
+                out_path.write_text("OK_MAX", encoding="utf-8")
+            )
+
+            dump = _run([
+                "-s", ".py",
+                "-a", "src/module/alpha.py",
+                "--ai",
+                "--ai-max-tokens", "777",
+            ])
+
+            self.assertIn("OK_MAX", dump, "AI output not reflected in final dump")
+            # Inspect forwarded kwargs.
+            _, kwargs = mocked.call_args
+            self.assertEqual(kwargs.get("max_tokens"), 777,
+                             "CLI --ai-max-tokens must be forwarded as max_tokens")
+
+
+class AIReasoningEffortForwardingTests(unittest.TestCase):
+    """Validate that --ai-reasoning-effort is forwarded into _call_openai(reasoning_effort=...)."""
+
+    def test_ai_reasoning_effort_forwarded(self) -> None:
+        with patch.object(ghconcat, "_call_openai") as mocked, \
+                patch.dict(os.environ, {"OPENAI_API_KEY": "dummy", "GHCONCAT_DISABLE_AI": "0"}):
+            mocked.side_effect = (
+                lambda prompt, out_path, **kwargs:
+                out_path.write_text("OK_RE", encoding="utf-8")
+            )
+
+            _ = _run([
+                "-s", ".py",
+                "-a", "src/module/alpha.py",
+                "--ai",
+                "--ai-model", "o3",  # reasoning family
+                "--ai-reasoning-effort", "high",  # should be forwarded verbatim
+            ])
+
+            _, kwargs = mocked.call_args
+            self.assertEqual(kwargs.get("reasoning_effort"), "high",
+                             "CLI --ai-reasoning-effort must be forwarded")
+
+
+class AIFlagsInheritanceTests(unittest.TestCase):
+    """
+    Verify inheritance of AI flags from root to child contexts and that a child
+    can override max-tokens while inheriting reasoning-effort (or vice versa).
+    """
+
+    def test_ai_flags_inherit_and_child_override(self) -> None:
+        gctx = FIXTURES / "tmp" / "ai_flags_inherit.gctx"
+        gctx.parent.mkdir(parents=True, exist_ok=True)
+        gctx.write_text("""
+            --ai-model o3
+            --ai-max-tokens 123
+            --ai-reasoning-effort medium
+
+            [one]
+            --ai
+            -s .py
+            -a src/module/alpha.py
+
+            [two]
+            --ai
+            --ai-max-tokens 77
+            -s .py
+            -a src/module/alpha.py
+        """, encoding="utf-8")
+
+        calls: list[dict] = []
+
+        def fake_call(prompt, out_path, **kwargs):
+            out_path.write_text("OK_INH", encoding="utf-8")
+            # Capture forwarded kwargs for each child invocation.
+            calls.append(kwargs)
+
+        with patch.object(ghconcat, "_call_openai", side_effect=fake_call), \
+                patch.dict(os.environ, {"OPENAI_API_KEY": "dummy", "GHCONCAT_DISABLE_AI": "0"}):
+            _ = _run(["-x", str(gctx)])
+
+        self.assertEqual(len(calls), 2, "Expected two AI calls (from [one] and [two])")
+
+        first, second = calls
+        # Child [one] should inherit both values from root
+        self.assertEqual(first.get("max_tokens"), 123, "Child [one] must inherit ai-max-tokens")
+        self.assertEqual(first.get("reasoning_effort"), "medium",
+                         "Child [one] must inherit ai-reasoning-effort")
+
+        # Child [two] overrides only the max_tokens; effort remains inherited
+        self.assertEqual(second.get("max_tokens"), 77, "Child [two] must override ai-max-tokens")
+        self.assertEqual(second.get("reasoning_effort"), "medium",
+                         "Child [two] must still inherit ai-reasoning-effort")
 
 
 # --------------------------------------------------------------------------- #
