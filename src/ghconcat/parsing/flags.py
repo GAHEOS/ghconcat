@@ -10,9 +10,6 @@ Exports
 VALUE_FLAGS : Set[str]
     Flags whose *next* token is considered a value (e.g., "-o FILE").
 """
-
-from __future__ import annotations
-
 from typing import Set
 
 

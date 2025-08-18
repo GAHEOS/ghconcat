@@ -2,10 +2,10 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from .pdf_reader import PdfTextExtractor
-from .excel_reader import ExcelTsvExporter
+from ghconcat.io.pdf_reader import PdfTextExtractor
+from ghconcat.io.excel_reader import ExcelTsvExporter
 
 
 class FileReader(ABC):
@@ -123,11 +123,26 @@ class ReaderRegistry:
         self._map: Dict[str, FileReader] = {}
         self._rules: List[_Rule] = []
         self._default: FileReader = default_reader or DefaultTextReader()
+        # New: a stack of mapping snapshots to support push/pop scoped overrides
+        self._stack: List[Tuple[Dict[str, FileReader], List[_Rule], FileReader]] = []
 
-    # ---------------------
-    # Backward-compatible API
-    # ---------------------
+    def push(self) -> None:
+        """Push the current mapping/rules/default onto an internal stack.
 
+        This allows temporary overrides that can be safely reverted with `pop()`.
+        """
+        self._stack.append((self._map.copy(), list(self._rules), self._default))
+
+    def pop(self) -> None:
+        """Restore the last pushed mapping/rules/default.
+
+        If the stack is empty, this is a no-op (defensive behavior).
+        """
+        if not self._stack:
+            return
+        self._map, self._rules, self._default = self._stack.pop()
+
+    # Backwards-compatible registration API
     def register(self, suffixes: Sequence[str], reader: FileReader) -> None:
         """Register *reader* for every suffix in *suffixes* ('.ext' or 'ext').
 
@@ -153,9 +168,7 @@ class ReaderRegistry:
           2) Suffix map resolution (last registration wins).
           3) Default reader.
         """
-        # 1) Predicated rules
         if self._rules:
-            # Sort only predicated rules once per call; list is usually small.
             for rule in sorted(
                 (r for r in self._rules if r.predicate is not None),
                 key=lambda r: r.priority,
@@ -167,7 +180,6 @@ class ReaderRegistry:
                     continue
                 return rule.reader.read_lines(path)
 
-        # 2) Suffix map
         return self.for_suffix(path.suffix).read_lines(path)
 
     @property
@@ -178,10 +190,6 @@ class ReaderRegistry:
     def set_default(self, reader: FileReader) -> None:
         """Set the default reader used for unmatched suffixes."""
         self._default = reader
-
-    # ---------------------
-    # Extended API
-    # ---------------------
 
     def register_rule(
         self,
@@ -198,18 +206,6 @@ class ReaderRegistry:
         • Predicated rules take precedence over suffix map entries.
         • This method does not alter the suffix→reader map. Use `register()`
           to replace the reader for a suffix in a backwards compatible way.
-
-        Parameters
-        ----------
-        reader:
-            The FileReader implementation to be used when the rule matches.
-        priority:
-            Higher values win over lower ones. Ties preserve insertion order.
-        suffixes:
-            Optional suffix filter for the rule ('.ext' or 'ext').
-        predicate:
-            Optional callable receiving the file Path; should return True when
-            the rule applies (e.g., based on MIME sniffing).
         """
         norm: Optional[tuple[str, ...]] = None
         if suffixes:
@@ -219,6 +215,19 @@ class ReaderRegistry:
         self._rules.append(
             _Rule(reader=reader, priority=priority, suffixes=norm, predicate=predicate)
         )
+
+    # New: helper utilities for reversible temporary registrations
+    def register_temp(self, suffixes: Sequence[str], reader: FileReader) -> None:
+        """Push + register in a single call (temporary mapping).
+
+        Use `restore()` to revert to the previous mapping.
+        """
+        self.push()
+        self.register(suffixes, reader)
+
+    def restore(self) -> None:
+        """Revert the last `register_temp()` call."""
+        self.pop()
 
 
 _GLOBAL_REGISTRY: Optional[ReaderRegistry] = None

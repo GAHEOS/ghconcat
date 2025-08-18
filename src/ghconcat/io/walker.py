@@ -32,7 +32,6 @@ class WalkerAppender:
         self,
         *,
         read_file_as_lines,
-        html_to_text,  # kept for constructor compatibility (unused here)
         apply_replacements,
         slice_lines,
         clean_lines,
@@ -40,19 +39,22 @@ class WalkerAppender:
         seen_files: Set[str],
         logger: Optional[logging.Logger] = None,
     ) -> None:
-        """
+        """Initialize the WalkerAppender.
+
         Parameters
         ----------
         read_file_as_lines:
             Callable(Path) -> List[str]. Uniform text reader for any file type.
-        html_to_text:
-            Callable(str) -> str. (Deprecated here; handled by the registry)
+            The reader is expected to return *text lines* with trailing '\\n'.
         apply_replacements:
-            Callable(str, Sequence[str] | None, Sequence[str] | None) -> str.
+            Callable(text, replace_specs | None, preserve_specs | None) -> str.
+            Regex-based transformation (delete/replace with preserve-exceptions).
         slice_lines:
             Callable(raw_lines, begin, total, keep_header) -> List[str].
+            Performs range slicing with optional header retention.
         clean_lines:
             Callable(lines, ext, rm_simple=..., rm_all=..., rm_imp=..., rm_exp=..., keep_blank=...) -> List[str].
+            Applies comment/import/export/blank filtering based on file suffix.
         header_delim:
             Banner delimiter string, e.g. "===== ".
         seen_files:
@@ -142,10 +144,8 @@ class WalkerAppender:
         for idx, fp in enumerate(files):
             ext = fp.suffix.lower()
 
-            # Read raw lines via the unified registry-aware reader
             raw_lines = self._read_file_as_lines(fp)
 
-            # Keep the legacy PDF special-case for comment cleaning rules
             if fp.suffix.lower() == ".pdf":
                 ext = ""
 

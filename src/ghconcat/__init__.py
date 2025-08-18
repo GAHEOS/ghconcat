@@ -1,20 +1,20 @@
 """
 ghconcat package public API.
 """
-from __future__ import annotations
-
-from .ghconcat import (  # type: ignore
+from .core import GitRepositoryManagerProtocol, GitManagerFactoryProtocol
+from ghconcat.discovery.git_repository import GitRepositoryManager
+from ghconcat.discovery.url_fetcher import UrlFetcher, UrlFetcherProtocol, UrlFetcherFactoryProtocol
+from ghconcat.cli import (  # type: ignore
     GhConcat,
     HEADER_DELIM,
     _call_openai,
     _perform_upgrade,
     _interpolate
 )
-from .pdf_reader import PdfTextExtractor
-from .excel_reader import ExcelTsvExporter
-from .walker import WalkerAppender
-from .url_fetcher import UrlFetcher
-from .readers import (
+from ghconcat.io.pdf_reader import PdfTextExtractor
+from ghconcat.io.excel_reader import ExcelTsvExporter
+from ghconcat.io.walker import WalkerAppender
+from ghconcat.io.readers import (
     FileReader,
     ReaderRegistry,
     get_global_reader_registry,
@@ -22,12 +22,20 @@ from .readers import (
     PdfFileReader,
     ExcelFileReader,
 )
-from .html_reader import HtmlToTextReader
-from .ai_client import OpenAIClient
-from .git_repository import GitRepositoryManager
-from .textops import TextTransformer
-from .envctx import EnvContext
-from .execution import ExecutionEngine  # NEW export
+from ghconcat.io.html_reader import HtmlToTextReader
+from ghconcat.ai.ai_client import OpenAIClient
+from ghconcat.processing.text_ops import TextTransformer
+from ghconcat.processing.envctx import EnvContext
+from ghconcat.rendering.execution import ExecutionEngine  # existing export
+
+from ghconcat.rendering.path_resolver import PathResolverProtocol
+from ghconcat.rendering.renderer import RendererProtocol
+from ghconcat.ai.ai_processor import AIProcessorProtocol
+from ghconcat.io.file_reader_service import FileReadingService  # existing export
+
+from ghconcat.processing.line_ops import LineProcessingService
+from ghconcat.processing.string_interpolator import StringInterpolator
+from ghconcat.processing.comment_rules import COMMENT_RULES  # <- new public export
 
 __all__ = [
     "GhConcat",
@@ -47,8 +55,19 @@ __all__ = [
     "GitRepositoryManager",
     "TextTransformer",
     "EnvContext",
-    "ExecutionEngine",  # NEW
+    "ExecutionEngine",
+    "PathResolverProtocol",
+    "RendererProtocol",
+    "AIProcessorProtocol",
+    "GitRepositoryManagerProtocol",
+    "GitManagerFactoryProtocol",
+    "UrlFetcherProtocol",
+    "UrlFetcherFactoryProtocol",
+    "FileReadingService",
+    "LineProcessingService",
+    "StringInterpolator",
     "_perform_upgrade",
-    "_interpolate"
+    "_interpolate",
+    "COMMENT_RULES",
 ]
 __version__ = "2.0.0"

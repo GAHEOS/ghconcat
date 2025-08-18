@@ -7,7 +7,7 @@ import urllib.parse
 import urllib.request
 from collections import deque
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple, Protocol, runtime_checkable
 
 
 class UrlFetcher:
@@ -46,16 +46,15 @@ class UrlFetcher:
     • Network errors are logged and the offending URL is skipped.
     """
 
-    #: Default header value used to prevent HTTP 403 on some hosts.
     _DEFAULT_UA = "ghconcat/2.0 (+https://gaheos.com)"
 
     def __init__(
-        self,
-        cache_root: Path,
-        *,
-        logger: Optional[logging.Logger] = None,
-        user_agent: str = _DEFAULT_UA,
-        ssl_ctx_provider: Optional[Callable[[str], Optional[ssl.SSLContext]]] = None,
+            self,
+            cache_root: Path,
+            *,
+            logger: Optional[logging.Logger] = None,
+            user_agent: str = _DEFAULT_UA,
+            ssl_ctx_provider: Optional[Callable[[str], Optional[ssl.SSLContext]]] = None,
     ) -> None:
         self._workspace = cache_root
         self._cache_dir = self._workspace / ".ghconcat_urlcache"
@@ -65,7 +64,6 @@ class UrlFetcher:
         self._ua = user_agent
         self._ssl_ctx_for = ssl_ctx_provider or (lambda _url: None)
 
-        # Well-known extension sets (kept intentionally broad to mirror legacy behavior)
         self._TEXT_EXT = {
             ".html", ".htm", ".xhtml",
             ".md", ".markdown",
@@ -90,7 +88,6 @@ class UrlFetcher:
         }
         self._WELL_KNOWN_EXT = self._TEXT_EXT | self._BINARY_EXT
 
-        # Content-Type fallback → extension (legacy-compatible)
         self._MIME_FALLBACK = {
             "text/html": ".html",
             "application/json": ".json",
@@ -100,13 +97,9 @@ class UrlFetcher:
             "text/xml": ".xml",
         }
 
-        # Simple patterns reused during scraping
         self._href_re = re.compile(r'href=["\']?([^"\' >]+)', re.I)
         self._ext_re = re.compile(r"\.[A-Za-z0-9_-]{1,8}$")
 
-    # --------------------------------------------------------------------- #
-    # Public API
-    # --------------------------------------------------------------------- #
 
     def fetch(self, urls: Sequence[str]) -> List[Path]:
         """Download every URL and return the cached file paths.
@@ -140,11 +133,10 @@ class UrlFetcher:
 
                 raw_name = Path(urllib.parse.urlparse(link).path).name or f"remote_{idx}"
                 if "." not in raw_name:
-                    # Infer extension based on Content-Type
                     ext = (
-                        self._MIME_FALLBACK.get(ctype)
-                        or mimetypes.guess_extension(ctype)
-                        or ".html"
+                            self._MIME_FALLBACK.get(ctype)
+                            or mimetypes.guess_extension(ctype)
+                            or ".html"
                     )
                     raw_name += ext
 
@@ -157,13 +149,13 @@ class UrlFetcher:
         return out
 
     def scrape(
-        self,
-        seeds: Sequence[str],
-        *,
-        suffixes: Sequence[str],
-        exclude_suf: Sequence[str],
-        max_depth: int = 2,
-        same_host_only: bool = True,
+            self,
+            seeds: Sequence[str],
+            *,
+            suffixes: Sequence[str],
+            exclude_suf: Sequence[str],
+            max_depth: int = 2,
+            same_host_only: bool = True,
     ) -> List[Path]:
         """Breadth-first crawl starting from *seeds*, honoring suffix filters.
 
@@ -220,9 +212,6 @@ class UrlFetcher:
             return True
 
         def _skip_pre_download(ext: str) -> bool:
-            # Preserve historical semantics:
-            # - If ext is known, apply include/exclude now.
-            # - If ext unknown, allow download so that MIME can be used later.
             if ext in self._WELL_KNOWN_EXT:
                 if include_set and ext not in include_set:
                     return True
@@ -246,7 +235,6 @@ class UrlFetcher:
                 name = Path(urllib.parse.urlparse(url).path).name or f"remote_{idx}"
                 ext = _extract_ext(name)
                 if (not ext) or (ext not in self._WELL_KNOWN_EXT):
-                    # Try to infer a better extension from MIME or include-set hints
                     ext = (ext if ext in include_set else "") or self._MIME_FALLBACK.get(ctype) or ".html"
                     if not name.lower().endswith(ext):
                         name += ext
@@ -297,7 +285,47 @@ class UrlFetcher:
                             continue
                         queue.append((abs_url, depth + 1))
                 except Exception:
-                    # HTML parse is best-effort; ignore failures.
                     pass
 
         return out_paths
+
+
+@runtime_checkable
+class UrlFetcherProtocol(Protocol):
+    """Contract for a component that downloads and/or scrapes URLs."""
+
+    def fetch(self, urls: List[str]) -> List[Path]:
+        """Download URLs into a local cache and return their file paths."""
+
+    def scrape(
+            self,
+            seeds: List[str],
+            *,
+            suffixes: List[str],
+            exclude_suf: List[str],
+            max_depth: int,
+            same_host_only: bool,
+    ) -> List[Path]:
+        """Crawl (BFS) from *seeds* and return paths to captured files."""
+
+
+@runtime_checkable
+class UrlFetcherFactoryProtocol(Protocol):
+    """Contract for a factory that creates a URL fetcher for a workspace."""
+
+    def __call__(self, workspace: Path) -> UrlFetcherProtocol:  # pragma: no cover - interface
+        ...
+
+
+class DefaultUrlFetcherFactory:
+    """
+    Default factory that wraps a user-provided *builder*.
+
+    It maintains compatibility with the previous pattern (lambdas).
+    """
+
+    def __init__(self, builder: Callable[[Path], UrlFetcherProtocol]) -> None:
+        self._builder = builder
+
+    def __call__(self, workspace: Path) -> UrlFetcherProtocol:
+        return self._builder(workspace)

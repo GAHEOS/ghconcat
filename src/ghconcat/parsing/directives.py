@@ -1,18 +1,21 @@
 """
 directives – Directive file parsing utilities for ghconcat.
 
-OO parser (`DirectiveParser`) with explicit validation split from tokenization.
-Maintains full backwards compatibility with existing functions/behavior.
-"""
+This module extracts the directive-file parsing logic from the monolithic
+implementation into a dedicated, reusable unit. It provides:
 
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import List, Optional
+- DirNode: a minimal tree structure holding tokens per context.
+- DirectiveParser: OO parser with parse()/parse_lines()/validate().
+- parse_directive_file(...): a thin wrapper for backwards compatibility.
+"""
 import logging
 import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable, List, Optional
 
-from .flags import VALUE_FLAGS as _VALUE_FLAGS
-from .tokenize import tokenize_directive_line
+from ghconcat.parsing.flags import VALUE_FLAGS as _VALUE_FLAGS
+from ghconcat.parsing.tokenize import tokenize_directive_line
 
 
 class DirectiveSyntaxError(ValueError):
@@ -41,32 +44,36 @@ _HEADER_RE = re.compile(r"^\s*\[(?P<name>[^\]]*)]\s*$")
 
 
 class DirectiveParser:
-    """Object-oriented directive parser with explicit validation hooks.
+    """OO parser for ghconcat directive files with strict validation.
+
+    The parsing semantics match ghconcat v2 with two safeguards that avoid
+    cross-line token bleeding and honor inline comments, as implemented by
+    the shared tokenizer.
 
     Parameters
     ----------
     logger:
-        Optional logger used to report non-fatal information. Fatal syntax
-        validation still raises `DirectiveSyntaxError`.
+        Optional logger instance for consistent logs; parsing errors raise
+        `DirectiveSyntaxError` with precise line numbers.
     """
 
     def __init__(self, *, logger: Optional[logging.Logger] = None) -> None:
-        self._log = logger or logging.getLogger("ghconcat.directives")
+        self._log = logger or logging.getLogger("ghconcat.dirparser")
 
     def parse(self, path: Path) -> DirNode:
-        """Parse a directive file *path* into a `DirNode` tree."""
-        lines = path.read_text(encoding="utf-8").splitlines(True)
-        return self.parse_lines(lines)
+        """Parse *path* into a DirNode tree with clear syntax validation."""
+        with path.open("r", encoding="utf-8") as fp:
+            return self.parse_lines(fp.readlines())
 
-    def parse_lines(self, lines: List[str]) -> DirNode:
-        """Parse preloaded *lines* into a `DirNode` tree."""
+    def parse_lines(self, lines: Iterable[str]) -> DirNode:
+        """Parse an iterable of lines into a DirNode tree."""
         root = DirNode()
         current = root
 
         for lno, raw in enumerate(lines, start=1):
             s = raw.strip()
 
-            # Validation: unterminated header
+            # Strict header validation (unterminated or empty name)
             if s.startswith("[") and "]" not in s:
                 raise DirectiveSyntaxError(
                     f"unterminated context header at line {lno}: missing ']'"
@@ -86,20 +93,17 @@ class DirectiveParser:
             if toks:
                 current.tokens.extend(toks)
 
-        # Strict validation for dangling value-taking flag at file end:
-        # append empty string (compat with legacy tokenizer behavior)
-        self.validate(current.tokens)
-
+        # Final validation for a trailing value-taking flag (append empty value)
+        current.tokens = self.validate(current.tokens)
         return root
 
-    def validate(self, tokens: List[str]) -> None:
-        """Apply strict validations and post-processing to *tokens*."""
+    def validate(self, tokens: List[str]) -> List[str]:
+        """Ensure a trailing value-taking flag gets an empty value."""
         if tokens and tokens[-1] in _VALUE_FLAGS:
-            tokens.append("")
+            return [*tokens, ""]
+        return tokens
 
-
-# --- Backwards-compatible functional API ------------------------------------
 
 def parse_directive_file(path: Path) -> DirNode:
-    """Compatibility wrapper returning the root DirNode."""
+    """Backwards-compatible functional parser wrapper."""
     return DirectiveParser().parse(path)

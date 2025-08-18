@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from .readers import FileReader
+from ghconcat.io.readers import FileReader
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
