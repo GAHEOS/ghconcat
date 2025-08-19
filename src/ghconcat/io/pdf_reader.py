@@ -53,40 +53,39 @@ class PdfTextExtractor:
         try:
             from pypdf import PdfReader  # type: ignore
         except ModuleNotFoundError:
-            self._log.warning("✘ %s: instala `pypdf` para habilitar soporte PDF.", pdf_path)
+            self._log.warning("✘ %s: install `pypdf` to enable PDF support.", pdf_path)
             return ""
 
         try:
             reader = PdfReader(pdf_path)
         except Exception as exc:  # noqa: BLE001
-            self._log.error("✘ %s: fallo al abrir PDF (%s).", pdf_path, exc)
+            self._log.error("✘ %s: failed to open PDF (%s).", pdf_path, exc)
             return ""
 
         pages_text: list[str] = []
         for idx, page in enumerate(reader.pages, start=1):
             txt = page.extract_text() or ""
             pages_text.append(txt.strip())
-            self._log.debug("PDF %s  · página %d → %d caracteres", pdf_path.name, idx, len(txt))
+            self._log.debug("PDF %s  · page %d → %d chars", pdf_path.name, idx, len(txt))
 
         full = "\n\n".join(pages_text).strip()
         if full or not self._ocr_if_empty:
             if not full:
-                self._log.warning("⚠ %s: sin texto incrustado.", pdf_path)
+                self._log.warning("⚠ %s: no embedded text found.", pdf_path)
             return full
 
-        # OCR fallback only when needed
         try:
             from pdf2image import convert_from_path  # type: ignore
             import pytesseract  # type: ignore
         except ModuleNotFoundError:
-            self._log.warning("✘ %s: OCR no disponible (pdf2image/pytesseract faltan).", pdf_path)
+            self._log.warning("✘ %s: OCR unavailable (pdf2image/pytesseract missing).", pdf_path)
             return ""
 
-        self._log.info("⏳ OCR (%d pág.) → %s", len(reader.pages), pdf_path.name)
+        self._log.info("⏳ OCR (%d pages) → %s", len(reader.pages), pdf_path.name)
         try:
             images = convert_from_path(pdf_path, dpi=self._dpi)
             ocr_chunks = [pytesseract.image_to_string(img) for img in images]
             return "\n\n".join(chunk.strip() for chunk in ocr_chunks)
         except Exception as exc:  # noqa: BLE001
-            self._log.error("✘ OCR falló en %s (%s).", pdf_path, exc)
+            self._log.error("✘ OCR failed for %s (%s).", pdf_path, exc)
             return ""

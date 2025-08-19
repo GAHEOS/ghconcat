@@ -12,8 +12,6 @@ reusable class:
 The implementation is streaming and does not rely on heavy templating engines.
 """
 
-from __future__ import annotations
-
 import re
 from typing import Dict
 

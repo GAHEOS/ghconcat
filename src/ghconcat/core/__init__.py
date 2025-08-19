@@ -1,3 +1,4 @@
+# src/ghconcat/core/__init__.py
 """
 ghconcat.core – Stable DI contracts (Protocols & factories).
 
@@ -8,11 +9,8 @@ architectural boundaries:
 
     • ghconcat.core.git  → Git-related Protocols & default factory
     • ghconcat.core.url  → URL-related Protocols & default factory
-
-Rationale
----------
-Keeping the canonical definitions in one place prevents cyclic imports and
-makes contracts discoverable for both library users and test doubles.
+    • ghconcat.core.interfaces.* → Canonical Protocols
+    • ghconcat.rendering.factories → Default factories (Walker/Renderer/PathResolver)
 """
 
 from .git import (
@@ -26,6 +24,20 @@ from .url import (
     DefaultUrlFetcherFactory,
 )
 
+# New DI factory protocols
+from ghconcat.core.interfaces.factories import (
+    WalkerFactoryProtocol,
+    RendererFactoryProtocol,
+    PathResolverFactoryProtocol,
+)
+
+# Default factories for rendering/path resolver
+from ghconcat.rendering.factories import (
+    DefaultWalkerFactory,
+    DefaultRendererFactory,
+    DefaultPathResolverFactory,
+)
+
 __all__ = [
     "GitRepositoryManagerProtocol",
     "GitManagerFactoryProtocol",
@@ -33,4 +45,11 @@ __all__ = [
     "UrlFetcherProtocol",
     "UrlFetcherFactoryProtocol",
     "DefaultUrlFetcherFactory",
+    # New DI artifacts
+    "WalkerFactoryProtocol",
+    "RendererFactoryProtocol",
+    "PathResolverFactoryProtocol",
+    "DefaultWalkerFactory",
+    "DefaultRendererFactory",
+    "DefaultPathResolverFactory",
 ]

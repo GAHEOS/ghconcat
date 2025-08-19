@@ -12,8 +12,6 @@ It mirrors the legacy mapping previously embedded in ghconcat.py to enable:
   • Focused unit tests per language/suffix
 """
 
-from __future__ import annotations
-
 import re
 from typing import Dict, Optional, Tuple, Pattern
 

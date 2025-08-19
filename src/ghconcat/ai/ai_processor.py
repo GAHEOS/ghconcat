@@ -2,7 +2,7 @@
 AI processor component for ghconcat.
 
 This module provides:
-  • AIProcessorProtocol – DI-friendly interface used by the engine.
+  • AIProcessorProtocol – now defined in ghconcat.core.interfaces.ai.
   • AIProcessor         – thin wrapper around an injected OpenAI bridge.
   • DefaultAIProcessor  – explicit default implementation.
 
@@ -12,29 +12,9 @@ current tests and behavior remain unchanged.
 
 import logging
 from pathlib import Path
-from typing import Optional, Protocol, runtime_checkable
+from typing import Optional
 
-
-@runtime_checkable
-class AIProcessorProtocol(Protocol):
-    """Protocol describing the AI processor."""
-
-    def run(
-        self,
-        *,
-        prompt: str,
-        out_path: Path,
-        model: str,
-        system_prompt: str,
-        temperature: Optional[float],
-        top_p: Optional[float],
-        presence_penalty: Optional[float],
-        frequency_penalty: Optional[float],
-        seeds_path: Optional[Path],
-        max_tokens: Optional[int],
-        reasoning_effort: Optional[str],
-    ) -> None:
-        """Invoke the underlying AI backend with the given parameters."""
+from ghconcat.core.interfaces.ai import AIProcessorProtocol
 
 
 class AIProcessor(AIProcessorProtocol):

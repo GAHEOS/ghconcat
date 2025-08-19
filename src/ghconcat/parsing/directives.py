@@ -70,10 +70,13 @@ class DirectiveParser:
         root = DirNode()
         current = root
 
+        def _finalize(node: DirNode) -> None:
+            """Validate a node's token list, appending empty value if needed."""
+            node.tokens = self.validate(node.tokens)
+
         for lno, raw in enumerate(lines, start=1):
             s = raw.strip()
 
-            # Strict header validation (unterminated or empty name)
             if s.startswith("[") and "]" not in s:
                 raise DirectiveSyntaxError(
                     f"unterminated context header at line {lno}: missing ']'"
@@ -81,6 +84,9 @@ class DirectiveParser:
 
             m = _HEADER_RE.match(s)
             if m:
+                # Close the previous node before starting a new context.
+                _finalize(current)
+
                 name = (m.group("name") or "").strip()
                 if not name:
                     raise DirectiveSyntaxError(f"empty context name at line {lno}")
@@ -93,8 +99,8 @@ class DirectiveParser:
             if toks:
                 current.tokens.extend(toks)
 
-        # Final validation for a trailing value-taking flag (append empty value)
-        current.tokens = self.validate(current.tokens)
+        # Finalize the last active node (root or last child).
+        _finalize(current)
         return root
 
     def validate(self, tokens: List[str]) -> List[str]:

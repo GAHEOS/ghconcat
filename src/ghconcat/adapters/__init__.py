@@ -9,14 +9,17 @@ aimed at:
 
 Modules
 -------
-git.py  → GitManagerAdapter
-url.py  → UrlFetcherAdapter
+git.py     → GitManagerAdapter
+url.py     → UrlFetcherAdapter
+walker.py  → WalkerAdapter   (new)
 """
 
 from .git import GitManagerAdapter
 from .url import UrlFetcherAdapter
+from .walker import WalkerAdapter
 
 __all__ = [
     "GitManagerAdapter",
     "UrlFetcherAdapter",
+    "WalkerAdapter",
 ]

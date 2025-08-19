@@ -4,6 +4,7 @@ execution – Orchestrated execution engine for ghconcat contexts.
 
 import argparse
 import logging
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -11,11 +12,10 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from ghconcat.parsing.directives import DirNode
 from ghconcat.parsing.list_ops import split_list
-from ghconcat.io.walker import WalkerAppender
-from ghconcat.rendering.path_resolver import PathResolverProtocol
-from ghconcat.rendering.renderer import RendererProtocol
-from ghconcat.ai.ai_processor import AIProcessorProtocol
-from ghconcat.discovery.file_discovery import FileDiscoveryProtocol
+
+from ghconcat.core.interfaces.fs import FileDiscoveryProtocol, PathResolverProtocol
+from ghconcat.core.interfaces.render import RendererProtocol
+from ghconcat.core.interfaces.ai import AIProcessorProtocol
 
 from ghconcat.io.readers import ReaderRegistry, get_global_reader_registry
 from ghconcat.io.reader_context import ReaderMappingScope
@@ -28,68 +28,26 @@ class ExecutionEngine:
     This class wires together argument parsing, discovery, rendering,
     templating and (optionally) AI processing in a test-friendly, DI-driven
     fashion.
-
-    Parameters
-    ----------
-    parser_factory:
-        Callable returning a fresh `argparse.ArgumentParser` for one context.
-    post_parse:
-        Callable to normalize argparse namespaces (tri-state flags, etc.).
-    merge_ns:
-        Callable to merge parent/child namespaces (child overrides, lists extend).
-    expand_tokens:
-        Callable that expands a token list using inherited env (see EnvContext).
-    parse_env_items:
-        Callable that parses `-e/-E` items into dicts with strict validation.
-    resolver:
-        Path resolver used for -w/-W, templates and outputs.
-    discovery:
-        File discovery aggregate (local walk, Git collection, URL fetcher/scraper).
-    renderer:
-        Renderer to concatenate files and apply optional templates.
-    ai:
-        AI processor wrapper for OpenAI integration.
-    workspaces_seen:
-        Mutable set to track per-workspace caches for later cleanup.
-    fatal:
-        Callable to abort immediately with an error message (CLI-compatible).
-    logger:
-        Optional logger instance.
-
-    registry:
-        Explicit ReaderRegistry to use for this engine run. If provided, it
-        is used as-is.
-
-    registry_factory:
-        Optional factory returning a ReaderRegistry to be used by the engine.
-        It enables tests to provide different reader sets without mutating
-        process-global state. Ignored when `registry` is provided.
-
-    Notes
-    -----
-    Selection precedence for the internal registry:
-        1) `registry` argument if not None
-        2) `registry_factory()` if provided
-        3) clone of the process-global registry (default)
+    ...
     """
 
     def __init__(
-            self,
-            *,
-            parser_factory: Callable[[], argparse.ArgumentParser],
-            post_parse: Callable[[argparse.Namespace], None],
-            merge_ns: Callable[[argparse.Namespace, argparse.Namespace], argparse.Namespace],
-            expand_tokens: Callable[[List[str], Dict[str, str]], List[str]],
-            parse_env_items: Callable[[Optional[List[str]]], Dict[str, str]],
-            resolver: PathResolverProtocol,
-            discovery: FileDiscoveryProtocol,
-            renderer: RendererProtocol,
-            ai: AIProcessorProtocol,
-            workspaces_seen: set[Path],
-            fatal: Callable[[str], None],
-            logger: Optional[logging.Logger] = None,
-            registry: Optional[ReaderRegistry] = None,
-            registry_factory: Optional[Callable[[], ReaderRegistry]] = None,
+        self,
+        *,
+        parser_factory: Callable[[], argparse.ArgumentParser],
+        post_parse: Callable[[argparse.Namespace], None],
+        merge_ns: Callable[[argparse.Namespace, argparse.Namespace], argparse.Namespace],
+        expand_tokens: Callable[[List[str], Dict[str, str]], List[str]],
+        parse_env_items: Callable[[Optional[List[str]]], Dict[str, str]],
+        resolver: PathResolverProtocol,
+        discovery: FileDiscoveryProtocol,
+        renderer: RendererProtocol,
+        ai: AIProcessorProtocol,
+        workspaces_seen: set[Path],
+        fatal: Callable[[str], None],
+        logger: Optional[logging.Logger] = None,
+        registry: Optional[ReaderRegistry] = None,
+        registry_factory: Optional[Callable[[], ReaderRegistry]] = None,
     ) -> None:
         self._parser_factory = parser_factory
         self._post_parse = post_parse
@@ -112,13 +70,11 @@ class ExecutionEngine:
             self._registry = self._clone_global_registry()
 
         self._read_file_as_lines = lambda fp: self._registry.read_lines(fp)
+        # Opt-in strict workspace guard (disabled by default for compatibility).
+        self._strict_ws = os.getenv("GHCONCAT_STRICT_WS") == "1"
 
     def _clone_global_registry(self) -> ReaderRegistry:
-        """Create a shallowly cloned ReaderRegistry from the global one.
-
-        The clone copies suffix map, rules and default reader references. This is
-        sufficient because built-in readers are stateless and safe to reuse.
-        """
+        """Create a shallowly cloned ReaderRegistry from the global one."""
         g = get_global_reader_registry(self._log)
         cloned = ReaderRegistry(default_reader=g.default_reader)
         for rule in getattr(g, "_rules", []):
@@ -145,12 +101,11 @@ class ExecutionEngine:
         ns_self = self._parser_factory().parse_args(tokens)
         self._post_parse(ns_self)
 
-        ns_effective = (
-            self._merge_ns(ns_parent, ns_self) if ns_parent else ns_self
-        )
+        ns_effective = self._merge_ns(ns_parent, ns_self) if ns_parent else ns_self
 
         if level == 0:
             gh_dump = []
+
         if ns_parent is None:
             base_for_root = Path.cwd()
             root = self._resolver.resolve(base_for_root, ns_effective.workdir or ".")
@@ -173,6 +128,20 @@ class ExecutionEngine:
             else:
                 workspace = parent_workspace or root
 
+        try:
+            setter = getattr(self._resolver, "set_workspace_root", None)
+            if callable(setter):
+                setter(workspace)
+        except Exception:
+            pass
+
+        def _guard_ws(path: Path) -> Path:
+            """Ensure *path* is within workspace when strict mode is on."""
+            if self._strict_ws and not self._resolver.is_within_workspace(path):
+                self._fatal(f"unsafe path outside workspace: {path}")
+                raise SystemExit(1)
+            return path
+
         self._workspaces_seen.add(workspace)
         ns_effective.workspace = str(workspace)
 
@@ -183,20 +152,10 @@ class ExecutionEngine:
             self._fatal(f"--workspace {workspace} not found")
             raise SystemExit(1)
 
-        walker = WalkerAppender(
-            read_file_as_lines=self._read_file_as_lines,  # provided by DI in ghconcat wrapper
-            apply_replacements=lambda text, r, p: text if (r is None and p is None) else self._renderer.interpolate(text, {}),  # placeholder; overwritten below
-            slice_lines=lambda raw, begin, total, keep_header: raw,  # overwritten below
-            clean_lines=lambda lines, ext, rm_simple, rm_all, rm_imp, rm_exp, keep_blank: list(lines),  # overwritten below
-            header_delim="===== ",
-            seen_files=set(),
-            logger=self._log,
-        )
-
         maybe_scope = None
         if getattr(ns_effective, "strip_html", False):
             scope = ReaderMappingScope(self._registry)
-            scope.__enter__()  # manual enter to hold scope across this node
+            scope.__enter__()  # hold scope across this node
             scope.register([".html", ".htm", ".xhtml"], HtmlToTextReader(logger=self._log))
             maybe_scope = scope
 
@@ -283,6 +242,7 @@ class ExecutionEngine:
         chosen_tpl = getattr(ns_effective, "template", None) or parent_child_tpl
         if chosen_tpl:
             tpl_path = self._resolver.resolve(workspace, chosen_tpl)
+            tpl_path = _guard_ws(tpl_path)
             if not tpl_path.exists():
                 self._fatal(f"template {tpl_path} not found")
                 raise SystemExit(1)
@@ -298,6 +258,7 @@ class ExecutionEngine:
         out_path: Optional[Path] = None
         if getattr(ns_effective, "output", None) and str(ns_effective.output).lower() != "none":
             out_path = self._resolver.resolve(workspace, ns_effective.output)
+            out_path = _guard_ws(out_path)
 
         if getattr(ns_effective, "ai", False):
             if out_path is None:
@@ -309,6 +270,7 @@ class ExecutionEngine:
             ai_sys = getattr(ns_effective, "ai_system_prompt", None)
             if ai_sys and str(ai_sys).lower() != "none":
                 spath = self._resolver.resolve(workspace, ai_sys)
+                spath = _guard_ws(spath)
                 if not spath.exists():
                     self._fatal(f"system prompt {spath} not found")
                     raise SystemExit(1)
@@ -320,6 +282,7 @@ class ExecutionEngine:
             ai_seeds = getattr(ns_effective, "ai_seeds", None)
             if ai_seeds and str(ai_seeds).lower() != "none":
                 seeds_path = self._resolver.resolve(workspace, ai_seeds)
+                seeds_path = _guard_ws(seeds_path)
 
             self._ai.run(
                 prompt=rendered,

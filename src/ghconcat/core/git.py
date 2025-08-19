@@ -1,19 +1,16 @@
 """
 core.git – Git-related Protocols & default factory for ghconcat.
 
-This module centralizes the Git contracts under the `ghconcat.core` namespace
-while preserving the exact runtime classes by re-using the canonical
-definitions from the original module. This avoids duplication and guarantees
-test compatibility (type identity remains the same).
+This module centralizes the Git contracts under the `ghconcat.core` namespace.
+It re-exports the canonical Protocols from `core.interfaces.git` and the
+default factory implementation from the discovery module.
 """
 
-from __future__ import annotations
-
-from ghconcat.discovery.git_manager import (  # reuse canonical definitions
+from ghconcat.core.interfaces.git import (
     GitRepositoryManagerProtocol,
     GitManagerFactoryProtocol,
-    DefaultGitManagerFactory,
 )
+from ghconcat.discovery.git_manager import DefaultGitManagerFactory
 
 __all__ = [
     "GitRepositoryManagerProtocol",
