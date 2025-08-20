@@ -5,17 +5,16 @@ from ghconcat.core.models import FetchRequest, FetchResponse
 
 
 class HTTPTransportProtocol(Protocol):
-    """Low-level HTTP transport (used for deterministic tests and retries)."""
+    """Minimal HTTP transport abstraction."""
+
     def request(self, req: FetchRequest) -> FetchResponse: ...
 
 
 @runtime_checkable
 class UrlFetcherProtocol(Protocol):
-    """High-level URL fetcher with caching/decoding policies (workspace-scoped)."""
+    """URL fetcher capable of fetching single URLs or scraping with BFS."""
 
-    def fetch(self, urls: Sequence[str]) -> List[Path]:
-        """Download absolute URLs and return cached file paths in order."""
-
+    def fetch(self, urls: Sequence[str]) -> List[Path]: ...
     def scrape(
         self,
         seeds: Sequence[str],
@@ -24,12 +23,10 @@ class UrlFetcherProtocol(Protocol):
         exclude_suf: Sequence[str],
         max_depth: int,
         same_host_only: bool,
-    ) -> List[Path]:
-        """Breadth-first crawl from *seeds* honoring filters and depth limits."""
+    ) -> List[Path]: ...
 
 
 class UrlFetcherFactoryProtocol(Protocol):
-    """Factory that creates a URL fetcher bound to a *workspace* directory."""
+    """Factory to build a `UrlFetcherProtocol` bound to a workspace root."""
 
-    def __call__(self, workspace: Path) -> UrlFetcherProtocol:  # pragma: no cover - interface
-        ...
+    def __call__(self, workspace: Path) -> UrlFetcherProtocol: ...

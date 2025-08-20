@@ -4,31 +4,14 @@ from typing import Callable, Dict, List, Optional, Sequence, Set
 
 
 class EnvContext:
-    """Environment/variables expansion engine for ghconcat.
+    """Environment token expansion and CLI KV parsing utilities.
 
-    This class encapsulates the logic to:
-      • Collect `-e/--env` and `-E/--global-env` assignments from CLI tokens.
-      • Perform deep `$VAR` interpolation among environment values themselves.
-      • Substitute `$VAR` occurrences across CLI tokens (skipping immediate
-        values of `-e/-E` so that definitions remain literal).
-      • Remove any flag whose value is the literal `"none"` (case-insensitive).
+    This helper is responsible for:
+    - Collecting environment `VAR=VAL` assignments from CLI tokens.
+    - Expanding `$VARNAME` occurrences in tokens using inherited + local env.
+    - Supporting a special `none` sentinel to disable value-taking flags.
 
-    The implementation is strictly compatible with the legacy functions
-    previously embedded in the monolith, but now packaged for reuse and
-    unit testing.
-
-    Parameters
-    ----------
-    logger:
-        Optional logger used for warnings; fatal conditions are reported
-        through the provided `on_error` callbacks in public methods.
-    var_pattern:
-        Regex pattern capturing a single group with the variable name.
-        The default matches `$NAME` where `NAME` is `[A-Za-z_][\\w-]*`.
-    assignment_flags:
-        Flags whose *next* token is an environment assignment (`VAR=VAL`).
-        Values following these flags are preserved verbatim during token
-        substitution to avoid double-expansion of definitions.
+    All public methods preserve the original behavior to keep tests green.
     """
 
     def __init__(
@@ -42,20 +25,8 @@ class EnvContext:
         self._env_ref = re.compile(var_pattern)
         self._assign_flags: Set[str] = set(assignment_flags)
 
-    # ---------- Public API ----------
-
     def refresh_values(self, env_map: Dict[str, str]) -> None:
-        """Expand `$V` references inside *env_map* until stable.
-
-        Parameters
-        ----------
-        env_map:
-            Mapping of environment keys to (possibly referencing) values.
-
-        Notes
-        -----
-        The method updates *env_map* **in place**.
-        """
+        """Resolve nested references in the provided map until stable."""
         changed = True
         while changed:
             changed = False
@@ -71,21 +42,10 @@ class EnvContext:
         *,
         on_error: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, str]:
-        """Collect `VAR=VAL` assignments following `-e/-E` flags.
+        """Collect `-e/--env` and `-E/--global-env` assignments from tokens.
 
-        Parameters
-        ----------
-        tokens:
-            CLI-like token sequence.
-        on_error:
-            Callback invoked with an error message when malformed input is
-            detected (missing value or `VAR=VAL` without `=`). If not provided,
-            a `ValueError` is raised instead.
-
-        Returns
-        -------
-        Dict[str, str]
-            A mapping with the collected assignments.
+        Returns:
+            Dict[str, str]: A map of collected variables.
         """
         env_map: Dict[str, str] = {}
         it = iter(tokens)
@@ -94,36 +54,18 @@ class EnvContext:
                 try:
                     kv = next(it)
                 except StopIteration:
-                    self._fatal("flag {tok} expects VAR=VAL", on_error)
+                    # Keep behavior but provide a clearer message.
+                    self._fatal(f"flag {tok} expects VAR=VAL", on_error)
                     continue
-                if "=" not in kv:
-                    self._fatal(f"{tok} expects VAR=VAL (got '{kv}')", on_error)
+                parsed = self._try_parse_kv_with_flag(tok, kv, on_error=on_error)
+                if parsed is None:
                     continue
-                key, val = kv.split("=", 1)
+                key, val = parsed
                 env_map[key] = val
         return env_map
 
-    def substitute_in_tokens(
-        self,
-        tokens: List[str],
-        env_map: Dict[str, str],
-    ) -> List[str]:
-        """Substitute `$VAR` occurrences across *tokens*.
-
-        Values that immediately follow `-e/-E` are **not** substituted.
-
-        Parameters
-        ----------
-        tokens:
-            CLI-like token list.
-        env_map:
-            Variable mapping to use for `$VAR` replacement.
-
-        Returns
-        -------
-        List[str]
-            New token list with substitutions applied.
-        """
+    def substitute_in_tokens(self, tokens: List[str], env_map: Dict[str, str]) -> List[str]:
+        """Expand `$VARS` in tokens using the provided `env_map`."""
         out: List[str] = []
         skip_value = False
         for tok in tokens:
@@ -131,12 +73,10 @@ class EnvContext:
                 out.append(tok)
                 skip_value = False
                 continue
-
             if tok in self._assign_flags:
                 out.append(tok)
                 skip_value = True
                 continue
-
             out.append(self._env_ref.sub(lambda m: env_map.get(m.group(1), ""), tok))
         return out
 
@@ -147,28 +87,7 @@ class EnvContext:
         value_flags: Set[str],
         none_value: str,
     ) -> List[str]:
-        """Remove any flag and its value when the value equals *none_value*.
-
-        Behavior matches the legacy `_strip_none()`:
-          1) First pass records **all** flags whose next value equals *none_value*
-             (case-insensitive).
-          2) Second pass skips **every** occurrence of such flags, removing
-             both the flag and its immediate value.
-
-        Parameters
-        ----------
-        tokens:
-            Token list to filter.
-        value_flags:
-            Set of flags that expect a following value.
-        none_value:
-            Sentinel (e.g., "none") that disables the flag.
-
-        Returns
-        -------
-        List[str]
-            Filtered tokens.
-        """
+        """Remove any flag followed by the `none` sentinel, plus its value slot."""
         disabled: Set[str] = set()
         i = 0
         while i + 1 < len(tokens):
@@ -177,7 +96,6 @@ class EnvContext:
                 i += 2
             else:
                 i += 1
-
         cleaned: List[str] = []
         skip_next = False
         for tok in tokens:
@@ -196,27 +114,13 @@ class EnvContext:
         *,
         on_error: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, str]:
-        """Parse a homogeneous list of `VAR=VAL` items into a dict.
-
-        Parameters
-        ----------
-        items:
-            A list of strings each expected as `VAR=VAL`. `None` yields `{}`.
-        on_error:
-            Callback used to report malformed entries. If absent, a
-            `ValueError` is raised.
-
-        Returns
-        -------
-        Dict[str, str]
-            Parsed mapping.
-        """
+        """Parse a list of `VAR=VAL` items (e.g., from `--env` group)."""
         env_map: Dict[str, str] = {}
         for itm in items or []:
-            if "=" not in itm:
-                self._fatal(f"--env expects VAR=VAL (got '{itm}')", on_error)
+            parsed = self._try_parse_kv(itm, on_error=on_error)
+            if parsed is None:
                 continue
-            key, val = itm.split("=", 1)
+            key, val = parsed
             env_map[key] = val
         return env_map
 
@@ -228,42 +132,56 @@ class EnvContext:
         value_flags: Set[str],
         none_value: str,
     ) -> List[str]:
-        """Full expansion pipeline for a directive line.
+        """Expand tokens by applying env inheritance, substitution and `none` stripping.
 
-        Steps (1:1 with legacy semantics):
-          1) Collect `-e/-E` assignments into a working env map, seeded by
-             *inherited_env*.
-          2) Deep-expand `$VAR` inside env values until stable.
-          3) Substitute `$VAR` across *tokens*, skipping immediate values
-             after `-e/-E`.
-          4) Remove any flag whose value is the literal *none_value*.
-
-        Parameters
-        ----------
-        tokens:
-            Input token list.
-        inherited_env:
-            Variables visible to this context before local `-e`/`-E`.
-        value_flags:
-            Flags expecting a value (used by the step #4).
-        none_value:
-            Disabling sentinel (e.g. `"none"`).
-
-        Returns
-        -------
-        List[str]
-            Expanded token list.
+        Steps:
+        1) Merge inherited env with local assignments found in `tokens`.
+        2) Resolve nested references (`$VAR`) within the env map.
+        3) Substitute `$VAR` occurrences inside the tokens themselves.
+        4) Remove any `flag none` pairs for flags in `value_flags`.
         """
-        env_all: Dict[str, str] = {**inherited_env, **self.collect_from_tokens(tokens)}
+        env_all: Dict[str, str] = {
+            **inherited_env,
+            **self.collect_from_tokens(tokens),
+        }
         self.refresh_values(env_all)
         expanded = self.substitute_in_tokens(tokens, env_all)
         return self.strip_none(expanded, value_flags=value_flags, none_value=none_value)
 
-    # ---------- Internals ----------
-
     def _fatal(self, msg: str, on_error: Optional[Callable[[str], None]]) -> None:
-        """Route fatal errors to the provided callback or raise ValueError."""
+        """Internal error dispatcher honoring the provided `on_error` callback."""
         if on_error is not None:
             on_error(msg)
         else:
             raise ValueError(msg)
+
+    # ----------------------------
+    # Internal helpers (deduped)
+    # ----------------------------
+
+    def _try_parse_kv(
+        self,
+        raw: str,
+        *,
+        on_error: Optional[Callable[[str], None]] = None,
+    ) -> Optional[tuple[str, str]]:
+        """Parse a generic `VAR=VAL` expression."""
+        if "=" not in raw:
+            self._fatal(f"--env expects VAR=VAL (got '{raw}')", on_error)
+            return None
+        key, val = raw.split("=", 1)
+        return key, val
+
+    def _try_parse_kv_with_flag(
+        self,
+        flag: str,
+        raw: str,
+        *,
+        on_error: Optional[Callable[[str], None]] = None,
+    ) -> Optional[tuple[str, str]]:
+        """Parse `VAR=VAL` but tailor error message for a specific flag."""
+        if "=" not in raw:
+            self._fatal(f"{flag} expects VAR=VAL (got '{raw}')", on_error)
+            return None
+        key, val = raw.split("=", 1)
+        return key, val

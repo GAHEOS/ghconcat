@@ -10,31 +10,35 @@ from ghconcat.core.models import ReaderHint
 
 
 class FileReader(ABC):
-    """Abstract file-to-lines reader."""
+    """Abstract file reader that returns the content as a list of lines."""
 
     @abstractmethod
     def read_lines(self, path: Path) -> List[str]:
-        """Return file content as a list of lines (with trailing newlines)."""
+        """Read and return lines for the given file path."""
         raise NotImplementedError
 
 
 class DefaultTextReader(FileReader):
+    """UTF-8 text reader with binary/Unicode error protection."""
+
     def __init__(self, *, logger: Optional[logging.Logger] = None) -> None:
-        self._log = logger or logging.getLogger('ghconcat.readers')
+        self._log = logger or logging.getLogger("ghconcat.readers")
 
     def read_lines(self, path: Path) -> List[str]:
         try:
-            content = path.read_text(encoding='utf-8', errors='ignore')
+            content = path.read_text(encoding="utf-8", errors="ignore")
             return content.splitlines(True)
         except UnicodeDecodeError:
-            self._log.warning('✘ %s: binary or non-UTF-8 file skipped.', path)
+            self._log.warning("✘ %s: binary or non-UTF-8 file skipped.", path)
             return []
         except Exception as exc:
-            self._log.error('⚠  could not read %s (%s)', path, exc)
+            self._log.error("⚠  could not read %s (%s)", path, exc)
             return []
 
 
 class PdfFileReader(FileReader):
+    """PDF reader that falls back to OCR if configured and needed."""
+
     def __init__(
         self,
         *,
@@ -43,39 +47,34 @@ class PdfFileReader(FileReader):
         ocr_if_empty: bool = True,
         dpi: int = 300,
     ) -> None:
-        self._log = logger or logging.getLogger('ghconcat.readers.pdf')
-        self._extractor = extractor or PdfTextExtractor(logger=self._log, ocr_if_empty=ocr_if_empty, dpi=dpi)
+        self._log = logger or logging.getLogger("ghconcat.readers.pdf")
+        self._extractor = extractor or PdfTextExtractor(
+            logger=self._log, ocr_if_empty=ocr_if_empty, dpi=dpi
+        )
 
     def read_lines(self, path: Path) -> List[str]:
         text = self._extractor.extract_text(path)
         if not text:
             return []
-        return [ln + '\n' for ln in text.splitlines()]
+        return [ln + "\n" for ln in text.splitlines()]
 
 
 class ExcelFileReader(FileReader):
+    """Excel reader that exports sheets to TSV before returning lines."""
+
     def __init__(self, *, exporter: Optional[ExcelTsvExporter] = None, logger: Optional[logging.Logger] = None) -> None:
-        self._log = logger or logging.getLogger('ghconcat.readers.excel')
+        self._log = logger or logging.getLogger("ghconcat.readers.excel")
         self._exporter = exporter or ExcelTsvExporter(logger=self._log)
 
     def read_lines(self, path: Path) -> List[str]:
         tsv = self._exporter.export_tsv(path)
         if not tsv:
             return []
-        return [ln + '\n' for ln in tsv.splitlines()]
+        return [ln + "\n" for ln in tsv.splitlines()]
 
 
 @dataclass(frozen=True)
 class _Rule:
-    """Reader selection rule.
-
-    Attributes:
-        reader: Reader instance to use.
-        priority: Higher executes earlier.
-        suffixes: Optional suffix filter (normalized to lowercase including dot).
-        predicate: Optional path predicate.
-        mimes: Optional set of accepted MIME types for hint-based selection.
-    """
     reader: FileReader
     priority: int = 0
     suffixes: Optional[tuple[str, ...]] = None
@@ -84,13 +83,12 @@ class _Rule:
 
 
 class ReaderRegistry:
-    """Registry mapping suffixes and rules to specific readers.
+    """Registry mapping file suffixes / predicates to `FileReader` instances.
 
-    Backward-compatible API:
-      - `read_lines(path)` remains unchanged.
-    New API:
-      - `read_lines_ex(path, hint=None)` to enable MIME-driven selection.
-      - `register_rule(..., mimes=None)` to express MIME acceptance.
+    The registry supports:
+      - Static suffix mapping (e.g. `.txt` → DefaultTextReader)
+      - Rule-based dispatch with priority, suffix/mime filters and predicates
+      - Push/pop stack to use temporary overrides within a context
     """
 
     def __init__(self, default_reader: Optional[FileReader] = None) -> None:
@@ -108,7 +106,7 @@ class ReaderRegistry:
         self._map, self._rules, self._default = self._stack.pop()
 
     def register(self, suffixes: Sequence[str], reader: FileReader) -> None:
-        norm: tuple[str, ...] = tuple(((s if s.startswith('.') else f'.{s}').lower() for s in suffixes))
+        norm: tuple[str, ...] = tuple(((s if s.startswith(".") else f".{s}").lower() for s in suffixes))
         for key in norm:
             self._map[key] = reader
 
@@ -116,22 +114,15 @@ class ReaderRegistry:
         return self._map.get(suffix.lower(), self._default)
 
     def read_lines(self, path: Path) -> List[str]:
-        """Backward-compatible read using suffix and predicate rules only."""
         return self.read_lines_ex(path, hint=None)
 
     def read_lines_ex(self, path: Path, hint: Optional[ReaderHint] = None) -> List[str]:
-        """Read file lines with optional MIME/sample hint selection.
-
-        The selection order is:
-          1) Highest-priority rule whose suffix/predicate match and (if provided)
-             whose `mimes` contains the hint MIME.
-          2) Fallback to suffix-mapped reader or default reader.
-        """
-        # Evaluate dynamic rules first (priority desc).
         if self._rules:
-            for rule in sorted((r for r in self._rules if r.predicate is not None or r.suffixes or r.mimes),
-                               key=lambda r: r.priority,
-                               reverse=True):
+            for rule in sorted(
+                (r for r in self._rules if r.predicate is not None or r.suffixes or r.mimes),
+                key=lambda r: r.priority,
+                reverse=True,
+            ):
                 if rule.suffixes and path.suffix.lower() not in rule.suffixes:
                     continue
                 if hint and rule.mimes and hint.mime and (hint.mime not in rule.mimes):
@@ -139,8 +130,6 @@ class ReaderRegistry:
                 if rule.predicate and (not rule.predicate(path)):
                     continue
                 return rule.reader.read_lines(path)
-
-        # Static suffix mapping (or default).
         return self.for_suffix(path.suffix).read_lines(path)
 
     @property
@@ -159,18 +148,9 @@ class ReaderRegistry:
         predicate: Optional[Callable[[Path], bool]] = None,
         mimes: Optional[Sequence[str]] = None,
     ) -> None:
-        """Register a predicate/priority-based rule.
-
-        Args:
-            reader: Target reader.
-            priority: Higher numbers execute earlier.
-            suffixes: Optional suffix filter.
-            predicate: Optional path predicate.
-            mimes: Optional MIME whitelist for hint-driven selection.
-        """
         norm_suffixes: Optional[tuple[str, ...]] = None
         if suffixes:
-            norm_suffixes = tuple(((s if s.startswith('.') else f'.{s}').lower() for s in suffixes))
+            norm_suffixes = tuple(((s if s.startswith(".") else f".{s}").lower() for s in suffixes))
         norm_mimes: Optional[tuple[str, ...]] = tuple(mimes) if mimes else None
         self._rules.append(
             _Rule(reader=reader, priority=priority, suffixes=norm_suffixes, predicate=predicate, mimes=norm_mimes)
@@ -186,7 +166,8 @@ class ReaderRegistry:
     def snapshot_suffix_mappings(self) -> Tuple[Dict[str, FileReader], FileReader]:
         return (dict(self._map), self._default)
 
-    def clone_suffix_only(self) -> 'ReaderRegistry':
+    def clone_suffix_only(self) -> "ReaderRegistry":
+        """Return a registry that copies only suffix→reader mappings."""
         cloned = ReaderRegistry(default_reader=self._default)
         for suffix, reader in self._map.items():
             cloned.register([suffix], reader)
@@ -198,11 +179,12 @@ _GLOBAL_REGISTRY: Optional[ReaderRegistry] = None
 
 
 def get_global_reader_registry(logger: Optional[logging.Logger] = None) -> ReaderRegistry:
+    """Global registry lazily initialized with sensible defaults (txt/pdf/xlsx)."""
     global _GLOBAL_REGISTRY
     if _GLOBAL_REGISTRY is None:
-        log = logger or logging.getLogger('ghconcat.readers')
+        log = logger or logging.getLogger("ghconcat.readers")
         reg = ReaderRegistry(default_reader=DefaultTextReader(logger=log))
-        reg.register(['.pdf'], PdfFileReader(logger=log))
-        reg.register(['.xls', '.xlsx'], ExcelFileReader(logger=log))
+        reg.register([".pdf"], PdfFileReader(logger=log))
+        reg.register([".xls", ".xlsx"], ExcelFileReader(logger=log))
         _GLOBAL_REGISTRY = reg
     return _GLOBAL_REGISTRY

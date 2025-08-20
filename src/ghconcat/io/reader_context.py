@@ -1,14 +1,6 @@
-"""
-reader_context – Scoped, reversible reader mapping for ghconcat.
-This module provides a small context manager that applies temporary
-suffix→reader mappings to a ReaderRegistry and restores the previous
-state automatically on exit.
-
-It enables per-execution or per-context HTML textification (-K) without
-mutating the process-wide global registry permanently.
-"""
 from dataclasses import dataclass
-from typing import Sequence
+from pathlib import Path
+from typing import Callable, Sequence
 
 from ghconcat.io.readers import FileReader
 from ghconcat.core.interfaces.readers import ReaderRegistryProtocol
@@ -16,17 +8,13 @@ from ghconcat.core.interfaces.readers import ReaderRegistryProtocol
 
 @dataclass
 class ReaderMappingScope:
-    """Context manager to apply temporary suffix→reader mappings.
+    """Context manager to temporarily override reader mappings in a registry.
 
     Example:
-        reg = ...  # any ReaderRegistryProtocol
-        with ReaderMappingScope(reg).register([".html", ".htm"], HtmlToTextReader()):
-            ...  # read files using the temporary mapping
-
-    Notes
-    -----
-    • Internally uses the ReaderRegistry.push() / pop() stack API (Protocol).
-    • Multiple .register(...) calls within the same scope are supported.
+        with ReaderMappingScope(registry) as scope:
+            scope.register(['.html'], HtmlToTextReader())
+            # ... do work with temporary mapping ...
+        # mappings restored automatically
     """
     registry: ReaderRegistryProtocol
 
@@ -35,8 +23,22 @@ class ReaderMappingScope:
         return self
 
     def register(self, suffixes: Sequence[str], reader: FileReader) -> "ReaderMappingScope":
-        """Register *reader* for given *suffixes* in the active frame."""
         self.registry.register(suffixes, reader)
+        return self
+
+    def register_rule(
+        self,
+        *,
+        reader: FileReader,
+        priority: int = 0,
+        suffixes: Sequence[str] | None = None,
+        predicate: Callable[[Path], bool] | None = None,
+        mimes: Sequence[str] | None = None,
+    ) -> "ReaderMappingScope":
+        """Forward `register_rule` to the underlying registry within the scope."""
+        self.registry.register_rule(
+            reader=reader, priority=priority, suffixes=suffixes, predicate=predicate, mimes=mimes
+        )
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

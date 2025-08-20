@@ -3,12 +3,7 @@ from typing import Optional, Protocol
 
 
 class AIProcessorProtocol(Protocol):
-    """DI-friendly contract for the AI processor used by the engine.
-
-    The protocol mirrors the legacy `_call_openai(...)` bridge by writing
-    the result to *out_path*. Implementations must be synchronous and
-    raise no exceptions (errors should be encoded in the output file).
-    """
+    """Abstract AI processor used by the execution engine to offload prompts."""
 
     def run(
         self,
@@ -24,5 +19,4 @@ class AIProcessorProtocol(Protocol):
         seeds_path: Optional[Path],
         max_tokens: Optional[int],
         reasoning_effort: Optional[str],
-    ) -> None:
-        """Invoke the underlying AI backend with the provided parameters."""
+    ) -> None: ...
