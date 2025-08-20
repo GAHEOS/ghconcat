@@ -13,6 +13,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, NoRetur
 import logging
 
 from ghconcat.logging.factory import DefaultLoggerFactory
+from ghconcat.parser import _build_parser
 from ghconcat.parsing.attr_sets import (
     _BOOL_ATTRS,
     _FLT_ATTRS,
@@ -67,134 +68,6 @@ def _configure_logging(enable_json: bool) -> None:
     setattr(_configure_logging, "_configured_mode", bool(enable_json))
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    """Build the CLI argument parser."""
-    p = argparse.ArgumentParser(
-        prog="ghconcat",
-        formatter_class=argparse.RawTextHelpFormatter,
-        usage="%(prog)s [-x FILE] … [OPTIONS]",
-        add_help=False,
-        description=(
-            "ghconcat – multi-level concatenation, slicing & templating tool\n"
-            'Everything after a “-x FILE” is parsed inside the directive-file '
-            "context unless another “-x” is encountered."
-        ),
-    )
-
-    g_loc = p.add_argument_group("Discovery")
-    g_rng = p.add_argument_group("Line slicing")
-    g_cln = p.add_argument_group("Cleaning")
-    g_sub = p.add_argument_group("Substitution")
-    g_tpl = p.add_argument_group("Template & output")
-    g_ai = p.add_argument_group("AI integration")
-    g_misc = p.add_argument_group("Miscellaneous")
-
-    # Discovery
-    g_loc.add_argument("-w", "--workdir", metavar="DIR", dest="workdir")
-    g_loc.add_argument("-W", "--workspace", metavar="DIR", dest="workspace")
-    g_loc.add_argument("-a", "--add-path", metavar="PATH", action="append", dest="add_path")
-    g_loc.add_argument("-A", "--exclude-path", metavar="DIR", action="append", dest="exclude_path")
-    g_loc.add_argument(
-        "--url-depth",
-        metavar="N",
-        type=int,
-        dest="url_depth",
-        default=0,
-        help="Depth for URL crawling (0 fetch-only, >0 breadth-first scrape).",
-    )
-    g_loc.add_argument(
-        "--url-allow-cross-domain",
-        action="store_true",
-        dest="url_cross_domain",
-        help="Allow cross-domain links during scraping (disabled by default).",
-    )
-    g_loc.add_argument("-s", "--suffix", metavar="SUF", action="append", dest="suffix")
-    g_loc.add_argument("-S", "--exclude-suffix", metavar="SUF", action="append", dest="exclude_suf")
-
-    # Line slicing
-    g_rng.add_argument("-n", "--total-lines", metavar="NUM", type=int, dest="total_lines")
-    g_rng.add_argument("-N", "--start-line", metavar="LINE", type=int, dest="first_line")
-    g_rng.add_argument("-m", "--keep-first-line", dest="first_flags", action="append_const", const="keep")
-    g_rng.add_argument("-M", "--no-first-line", dest="first_flags", action="append_const", const="drop")
-
-    # Substitution
-    g_sub.add_argument("-y", "--replace", metavar="SPEC", action="append", dest="replace_rules")
-    g_sub.add_argument("-Y", "--preserve", metavar="SPEC", action="append", dest="preserve_rules")
-
-    # Cleaning
-    g_cln.add_argument("-c", "--remove-comments", action="store_true", dest="rm_comments",
-                       help="Enable comment removal.")
-    g_cln.add_argument(
-        "-C",
-        "--no-remove-comments",
-        action="store_true",
-        dest="no_rm_comments",
-        help="Disable comment removal (cancels -c).",
-    )
-    g_cln.add_argument("-i", "--remove-import", action="store_true", dest="rm_import")
-    g_cln.add_argument("-I", "--remove-export", action="store_true", dest="rm_export")
-    g_cln.add_argument("-b", "--strip-blank", dest="blank_flags", action="append_const", const="strip")
-    g_cln.add_argument("-B", "--keep-blank", dest="blank_flags", action="append_const", const="keep")
-    g_cln.add_argument("-K", "--textify-html", action="store_true", dest="strip_html")
-
-    # Template & output
-    g_tpl.add_argument("-t", "--template", metavar="FILE", dest="template")
-    g_tpl.add_argument("-T", "--child-template", metavar="FILE", dest="child_template")
-    g_tpl.add_argument("-o", "--output", metavar="FILE", dest="output")
-    g_tpl.add_argument("-O", "--stdout", action="store_true", dest="to_stdout")
-    g_tpl.add_argument("-u", "--wrap", metavar="LANG", dest="wrap_lang")
-    g_tpl.add_argument("-U", "--no-wrap", action="store_true", dest="unwrap")
-    g_tpl.add_argument("-h", "--header", dest="hdr_flags", action="append_const", const="show")
-    g_tpl.add_argument("-H", "--no-headers", dest="hdr_flags", action="append_const", const="hide")
-    g_tpl.add_argument("-r", "--relative-path", dest="path_flags", action="append_const", const="relative")
-    g_tpl.add_argument("-R", "--absolute-path", dest="path_flags", action="append_const", const="absolute")
-    g_tpl.add_argument("-l", "--list", action="store_true", dest="list_only")
-    g_tpl.add_argument("-L", "--no-list", action="store_true", dest="no_list")
-    g_tpl.add_argument("-e", "--env", metavar="VAR=VAL", action="append", dest="env_vars")
-    g_tpl.add_argument("-E", "--global-env", metavar="VAR=VAL", action="append", dest="global_env")
-
-    # AI
-    g_ai.add_argument("--ai", action="store_true")
-    g_ai.add_argument("--ai-model", metavar="MODEL", default=DEFAULT_OPENAI_MODEL, dest="ai_model")
-    g_ai.add_argument("--ai-temperature", type=float, metavar="NUM", dest="ai_temperature")
-    g_ai.add_argument("--ai-top-p", type=float, metavar="NUM", dest="ai_top_p")
-    g_ai.add_argument("--ai-presence-penalty", type=float, metavar="NUM", dest="ai_presence_penalty")
-    g_ai.add_argument("--ai-frequency-penalty", type=float, metavar="NUM", dest="ai_frequency_penalty")
-    g_ai.add_argument("--ai-system-prompt", metavar="FILE", dest="ai_system_prompt")
-    g_ai.add_argument("--ai-seeds", metavar="FILE", dest="ai_seeds")
-    g_ai.add_argument("--ai-max-tokens", type=int, metavar="NUM", dest="ai_max_tokens")
-    g_ai.add_argument(
-        "--ai-reasoning-effort",
-        metavar="LEVEL",
-        dest="ai_reasoning_effort",
-        choices=("low", "medium", "high"),
-    )
-
-    # Misc
-    g_misc.add_argument("--preserve-cache", action="store_true")
-    g_misc.add_argument("--upgrade", action="store_true")
-    g_misc.add_argument("--json-logs", action="store_true", dest="json_logs")
-    g_misc.add_argument("--help", action="help")
-
-    # NEW: classifier injection (backwards-compatible defaults)
-    g_misc.add_argument(
-        "--classifier",
-        metavar="REF",
-        dest="classifier_ref",
-        help='Custom classifier as "module.path:ClassName" or "none". '
-             "If omitted, the default classifier is used. "
-             "You may also set GHCONCAT_CLASSIFIER env var.",
-    )
-    g_misc.add_argument(
-        "--classifier-policies",
-        metavar="NAME",
-        dest="classifier_policies",
-        choices=("standard", "none"),
-        default="standard",
-        help='Policy preset to register on the classifier (default: "standard").',
-    )
-
-    return p
 
 
 def _fatal(msg: str, code: int = 1) -> None:

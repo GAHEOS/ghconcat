@@ -12,12 +12,14 @@ from ghconcat.core.interfaces.ai import AIProcessorProtocol
 from ghconcat.core.interfaces.classifier import InputClassifierProtocol
 from ghconcat.core.interfaces.fs import FileDiscoveryProtocol, PathResolverProtocol
 from ghconcat.core.interfaces.render import RendererProtocol
+from ghconcat.core.report import ExecutionReport, StageTimer
 from ghconcat.io.html_reader import HtmlToTextReader
 from ghconcat.io.reader_context import ReaderMappingScope
 from ghconcat.io.readers import ReaderRegistry, get_global_reader_registry
 from ghconcat.parsing.directives import DirNode
 from ghconcat.parsing.list_ops import split_list
 from ghconcat.processing.input_classifier import DefaultInputClassifier
+from ghconcat.utils.paths import looks_like_git_spec, looks_like_url
 
 
 class ExecutionEngine:
@@ -41,6 +43,7 @@ class ExecutionEngine:
         registry: Optional[ReaderRegistry] = None,
         registry_factory: Optional[Callable[[], ReaderRegistry]] = None,
         classifier: Optional[InputClassifierProtocol] = None,
+        report: Optional[ExecutionReport] = None,  # ← nuevo, opcional
     ) -> None:
         self._parser_factory = parser_factory
         self._post_parse = post_parse
@@ -54,6 +57,7 @@ class ExecutionEngine:
         self._workspaces_seen = workspaces_seen
         self._fatal = fatal
         self._log = logger or logging.getLogger("ghconcat.exec")
+        self._report = report or ExecutionReport()
 
         if registry is not None:
             self._registry = registry
@@ -151,68 +155,81 @@ class ExecutionEngine:
         if level == 0:
             gh_dump = []
 
-        # Resolve root and workspace exactly as before
-        root, workspace = self._resolve_root_and_workspace(
-            ns_parent, ns_self, parent_root, parent_workspace
-        )
+        # Resolve root/workspace
+        root, workspace = self._resolve_root_and_workspace(ns_parent, ns_self, parent_root, parent_workspace)
         self._configure_resolver_workspace(workspace)
-
-        def _guard(path: Path) -> Path:
-            return self._guard_ws(path)
-
         self._workspaces_seen.add(workspace)
         ns_effective.workspace = str(workspace)
 
+        # Report: context
+        self._report.mark_context(root=root, workspace=workspace)
+
         if not root.exists():
-            self._fatal(f"--workdir {root} not found")
+            msg = f"--workdir {root} not found"
+            self._report.add_error(msg)
+            self._fatal(msg)
             raise SystemExit(1)
         if not workspace.exists():
-            self._fatal(f"--workspace {workspace} not found")
+            msg = f"--workspace {workspace} not found"
+            self._report.add_error(msg)
+            self._fatal(msg)
             raise SystemExit(1)
 
         maybe_scope = self._enter_html_reader_scope(ns_effective)
         try:
             dump_raw = ""
-            # Reclassify positional arguments (URLs/Git/local paths) deterministically
             self._classifier.reclassify(ns_effective)
 
             if ns_effective.add_path or ns_effective.git_path or ns_effective.urls or ns_effective.url_scrape:
                 suffixes = split_list(getattr(ns_effective, "suffix", None))
                 exclude_suf = split_list(getattr(ns_effective, "exclude_suf", None))
 
-                local_files = self._discovery.gather_local(
-                    add_paths=ns_effective.add_path,
-                    exclude_paths=ns_effective.exclude_path,
-                    suffixes=suffixes,
-                    exclude_suf=exclude_suf,
-                    root=root,
-                )
-                git_files = self._discovery.collect_git(
-                    git_specs=ns_effective.git_path,
-                    git_exclude=ns_effective.git_exclude,
-                    workspace=workspace,
-                    suffixes=suffixes,
-                    exclude_suf=exclude_suf,
-                )
-                remote_files = self._discovery.fetch_urls(urls=ns_effective.urls, workspace=workspace)
-                scraped_files = self._discovery.scrape_urls(
-                    seeds=ns_effective.url_scrape,
-                    workspace=workspace,
-                    suffixes=suffixes,
-                    exclude_suf=exclude_suf,
-                    max_depth=getattr(ns_effective, "url_depth", 0) or 0,
-                    same_host_only=not getattr(ns_effective, "url_cross_domain", False),
-                )
+                with StageTimer(self._report, "local_discovery"):
+                    local_files = self._discovery.gather_local(
+                        add_paths=ns_effective.add_path,
+                        exclude_paths=ns_effective.exclude_path,
+                        suffixes=suffixes,
+                        exclude_suf=exclude_suf,
+                        root=root,
+                    )
+                self._report.add_paths(local_files, source="local")
+
+                with StageTimer(self._report, "git_collect"):
+                    git_files = self._discovery.collect_git(
+                        git_specs=ns_effective.git_path,
+                        git_exclude=ns_effective.git_exclude,
+                        workspace=workspace,
+                        suffixes=suffixes,
+                        exclude_suf=exclude_suf,
+                    )
+                self._report.add_paths(git_files, source="git")
+
+                with StageTimer(self._report, "url_fetch"):
+                    remote_files = self._discovery.fetch_urls(urls=ns_effective.urls, workspace=workspace)
+                self._report.add_paths(remote_files, source="url")
+
+                with StageTimer(self._report, "url_scrape"):
+                    scraped_files = self._discovery.scrape_urls(
+                        seeds=ns_effective.url_scrape,
+                        workspace=workspace,
+                        suffixes=suffixes,
+                        exclude_suf=exclude_suf,
+                        max_depth=getattr(ns_effective, "url_depth", 0) or 0,
+                        same_host_only=not getattr(ns_effective, "url_cross_domain", False),
+                    )
+                self._report.add_paths(scraped_files, source="scrape")
+
                 files = [*local_files, *remote_files, *scraped_files, *git_files]
                 if files:
-                    dump_raw = self._renderer.concat(files, ns_effective, header_root=root)
+                    with StageTimer(self._report, "concat"):
+                        dump_raw = self._renderer.concat(files, ns_effective, header_root=root)
         finally:
             if maybe_scope is not None:
                 maybe_scope.__exit__(None, None, None)
 
         ctx_name = node.name
 
-        # Env handling (same semantics)
+        # Env (igual)
         global_env_map = self._parse_env_items(getattr(ns_effective, "global_env", None))
         local_env_map = self._parse_env_items(getattr(ns_effective, "env_vars", None))
         inherited_for_children = {**(inherited_vars or {}), **global_env_map}
@@ -225,7 +242,7 @@ class ExecutionEngine:
         if gh_dump is not None:
             gh_dump.append(dump_raw)
 
-        # Recurse into children
+        # Hijos
         for child in node.children:
             child_vars, _ = self.execute_node(
                 child,
@@ -242,27 +259,32 @@ class ExecutionEngine:
             if nxt is not None:
                 ns_effective.child_template = nxt or None
 
+        # Template
         rendered = dump_raw
         parent_child_tpl = getattr(ns_parent, "child_template", None) if ns_parent else None
         chosen_tpl = getattr(ns_effective, "template", None) or parent_child_tpl
         if chosen_tpl:
             tpl_path = self._resolver.resolve(workspace, chosen_tpl)
-            tpl_path = _guard(tpl_path)
+            tpl_path = self._guard_ws(tpl_path)
             if not tpl_path.exists():
-                self._fatal(f"template {tpl_path} not found")
+                msg = f"template {tpl_path} not found"
+                self._report.add_error(msg)
+                self._fatal(msg)
                 raise SystemExit(1)
-            rendered = self._renderer.render_template(tpl_path, vars_local, "".join(gh_dump or []))
+            with StageTimer(self._report, "template"):
+                rendered = self._renderer.render_template(tpl_path, vars_local, "".join(gh_dump or []))
 
         if ctx_name:
             vars_local[f"_t_{ctx_name}"] = rendered
             vars_local[ctx_name] = rendered
 
+        # AI
         final_out = rendered
         out_path: Optional[Path] = None
         out_val = getattr(ns_effective, "output", None)
         if out_val not in (None, "") and str(out_val).lower() != "none":
             out_path = self._resolver.resolve(workspace, out_val)
-            out_path = _guard(out_path)
+            out_path = self._guard_ws(out_path)
 
         if getattr(ns_effective, "ai", False):
             if out_path is None:
@@ -273,43 +295,47 @@ class ExecutionEngine:
             ai_sys = getattr(ns_effective, "ai_system_prompt", None)
             if ai_sys and str(ai_sys).lower() != "none":
                 spath = self._resolver.resolve(workspace, ai_sys)
-                spath = _guard(spath)
+                spath = self._guard_ws(spath)
                 if not spath.exists():
-                    self._fatal(f"system prompt {spath} not found")
+                    msg = f"system prompt {spath} not found"
+                    self._report.add_error(msg)
+                    self._fatal(msg)
                     raise SystemExit(1)
-                sys_prompt = self._renderer.interpolate(
-                    spath.read_text(encoding="utf-8"),
-                    vars_local,
-                )
+                sys_prompt = self._renderer.interpolate(spath.read_text(encoding="utf-8"), vars_local)
+
             seeds_path = None
             ai_seeds = getattr(ns_effective, "ai_seeds", None)
             if ai_seeds and str(ai_seeds).lower() != "none":
                 seeds_path = self._resolver.resolve(workspace, ai_seeds)
-                seeds_path = _guard(seeds_path)
-            self._ai.run(
-                prompt=rendered,
-                out_path=out_path,
-                model=getattr(ns_effective, "ai_model", ""),
-                system_prompt=sys_prompt,
-                temperature=getattr(ns_effective, "ai_temperature", None),
-                top_p=getattr(ns_effective, "ai_top_p", None),
-                presence_penalty=getattr(ns_effective, "ai_presence_penalty", None),
-                frequency_penalty=getattr(ns_effective, "ai_frequency_penalty", None),
-                seeds_path=seeds_path,
-                max_tokens=getattr(ns_effective, "ai_max_tokens", None),
-                reasoning_effort=getattr(ns_effective, "ai_reasoning_effort", None),
-            )
+                seeds_path = self._guard_ws(seeds_path)
+
+            with StageTimer(self._report, "ai"):
+                self._ai.run(
+                    prompt=rendered,
+                    out_path=out_path,
+                    model=getattr(ns_effective, "ai_model", ""),
+                    system_prompt=sys_prompt,
+                    temperature=getattr(ns_effective, "ai_temperature", None),
+                    top_p=getattr(ns_effective, "ai_top_p", None),
+                    presence_penalty=getattr(ns_effective, "ai_presence_penalty", None),
+                    frequency_penalty=getattr(ns_effective, "ai_frequency_penalty", None),
+                    seeds_path=seeds_path,
+                    max_tokens=getattr(ns_effective, "ai_max_tokens", None),
+                    reasoning_effort=getattr(ns_effective, "ai_reasoning_effort", None),
+                )
             final_out = out_path.read_text(encoding="utf-8")
 
         if ctx_name:
             vars_local[f"_ia_{ctx_name}"] = final_out
             vars_local[ctx_name] = final_out
 
+        # Salida a archivo
         if out_path and (not getattr(ns_effective, "ai", False)):
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(final_out, encoding="utf-8")
             self._log.info("✔ Output written → %s", out_path)
 
+        # STDOUT
         force_stdout = bool(getattr(ns_effective, "to_stdout", False))
         auto_root_stdout = level == 0 and getattr(ns_effective, "output", None) in (None, "none")
         if force_stdout or (auto_root_stdout and (not force_stdout)):
@@ -324,4 +350,19 @@ class ExecutionEngine:
             vars_local["ghconcat_dump"] = "".join(gh_dump)
 
         vars_local["__GH_NEXT_CHILD_TEMPLATE__"] = getattr(ns_effective, "child_template", None) or ""
+
+        # Report JSON (solo en raíz)
+        if level == 0:
+            self._report.finish()
+            report_target = getattr(ns_effective, "report_json", None)
+            if report_target not in (None, "", "none"):
+                target = Path(str(report_target))
+                if str(target) == "-":
+                    # imprimir al final para no interferir con piping del resultado
+                    print(self._report.to_json(), file=sys.stderr)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(self._report.to_json() + "\n", encoding="utf-8")
+                    self._log.info("✔ Report written → %s", target)
+
         return (vars_local, final_out)

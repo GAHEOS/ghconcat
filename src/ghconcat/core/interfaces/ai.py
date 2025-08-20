@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Optional, Protocol
+from typing import Optional, Protocol, runtime_checkable
 
 
+@runtime_checkable
 class AIProcessorProtocol(Protocol):
-    """Abstract AI processor used by the execution engine to offload prompts."""
+    """Thin adapter over OpenAI-like APIs to run a single prompt-to-file job."""
 
     def run(
         self,
@@ -19,4 +22,6 @@ class AIProcessorProtocol(Protocol):
         seeds_path: Optional[Path],
         max_tokens: Optional[int],
         reasoning_effort: Optional[str],
-    ) -> None: ...
+    ) -> None:
+        """Run the AI job and write the response to `out_path`."""
+        ...

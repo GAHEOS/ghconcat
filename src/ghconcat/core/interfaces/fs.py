@@ -1,46 +1,67 @@
+from __future__ import annotations
+
 from pathlib import Path
-from typing import List, Protocol, Sequence
+from typing import Protocol, Sequence, runtime_checkable
 
 
+@runtime_checkable
 class PathResolverProtocol(Protocol):
-    """Resolve and validate project/workspace paths."""
-    def resolve(self, base: Path, maybe: str | None) -> Path: ...
-    def is_within_workspace(self, path: Path) -> bool: ...
-    def workspace_root(self) -> Path | None: ...
+    """Resolves paths relative to a base and optionally enforces a workspace root."""
+
+    def resolve(self, base: Path, path: str) -> Path:
+        """Resolve `path` against `base`, normalizing symlinks when applicable."""
+        ...
+
+    def is_within_workspace(self, path: Path) -> bool:
+        """Return True if `path` is inside the configured workspace root."""
+        ...
+
+    def set_workspace_root(self, root: Path) -> None:
+        """Hint the resolver about the current workspace root (optional)."""
+        ...
 
 
+@runtime_checkable
 class FileDiscoveryProtocol(Protocol):
-    """Enumerate files across local paths, Git repositories and URLs."""
+    """Abstracts discovery across local FS, Git sources and remote URLs."""
 
     def gather_local(
         self,
         *,
-        add_paths: List[str] | None,
-        exclude_paths: List[str] | None,
-        suffixes: List[str],
-        exclude_suf: List[str],
+        add_paths: Sequence[str | Path],
+        exclude_paths: Sequence[str | Path] | None,
+        suffixes: Sequence[str] | None,
+        exclude_suf: Sequence[str] | None,
         root: Path,
-    ) -> List[Path]: ...
+    ) -> list[Path]:
+        """Discover local files from explicit paths and recursive directories."""
+        ...
 
     def collect_git(
         self,
         *,
-        git_specs: List[str] | None,
-        git_exclude: List[str] | None,
+        git_specs: Sequence[str] | None,
+        git_exclude: Sequence[str] | None,
         workspace: Path,
-        suffixes: List[str],
-        exclude_suf: List[str],
-    ) -> List[Path]: ...
+        suffixes: Sequence[str] | None,
+        exclude_suf: Sequence[str] | None,
+    ) -> list[Path]:
+        """Collect files from remote Git specs into the workspace cache."""
+        ...
 
-    def fetch_urls(self, *, urls: List[str] | None, workspace: Path) -> List[Path]: ...
+    def fetch_urls(self, *, urls: Sequence[str] | None, workspace: Path) -> list[Path]:
+        """Download URLs into a workspace cache and return local paths."""
+        ...
 
     def scrape_urls(
         self,
         *,
-        seeds: List[str] | None,
+        seeds: Sequence[str] | None,
         workspace: Path,
-        suffixes: List[str],
-        exclude_suf: List[str],
+        suffixes: Sequence[str] | None,
+        exclude_suf: Sequence[str] | None,
         max_depth: int,
         same_host_only: bool,
-    ) -> List[Path]: ...
+    ) -> list[Path]:
+        """Breadth‑first scrape starting at `seeds`, honoring suffix filters."""
+        ...
