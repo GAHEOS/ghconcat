@@ -1,31 +1,29 @@
+from __future__ import annotations
+
 import argparse
 import logging
 import os
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, List, Optional, Set, Tuple
+
+from ghconcat.core.interfaces import WalkerProtocol
+from ghconcat.processing.lang_support.py_docstrip import strip_comments_and_docstrings
+from ghconcat.processing.lang_support.dart_docstrip import strip_dart_comments
+from ghconcat.utils.suffixes import compute_suffix_filters, is_suffix_allowed
+from ghconcat.utils.paths import is_hidden_path, is_within_dir
 
 
-def _hidden(p: Path) -> bool:
-    """Return True if *p* has any hidden segment (leading dot component)."""
-    return any(part.startswith(".") for part in p.parts)
+class WalkerAppender(WalkerProtocol):
+    """File concatenation and pre-processing pipeline.
 
+    Responsibilities:
+      * Discover files under given roots honoring include/exclude suffix filters.
+      * Prepare file bodies (slicing, cleaning, comment/document stripping).
+      * Concatenate into a single text result, optionally wrapping segments.
 
-def _is_within(path: Path, parent: Path) -> bool:
-    """Return True if *path* is contained inside *parent*."""
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
-
-
-class WalkerAppender:
-    """
-    Filesystem walker and content appender with header, cleaning and replacement
-    support. It mirrors ghconcat's established semantics while allowing OOP use.
-
-    The class is dependency-injected to avoid tight coupling with the monolithic
-    module and to keep behavior 1:1 with the existing implementation.
+    Design notes:
+      * All heavy-lifting operations are injected (read/slice/clean/apply),
+        keeping this class cohesive and testable.
     """
 
     def __init__(
@@ -39,29 +37,6 @@ class WalkerAppender:
         seen_files: Set[str],
         logger: Optional[logging.Logger] = None,
     ) -> None:
-        """Initialize the WalkerAppender.
-
-        Parameters
-        ----------
-        read_file_as_lines:
-            Callable(Path) -> List[str]. Uniform text reader for any file type.
-            The reader is expected to return *text lines* with trailing '\\n'.
-        apply_replacements:
-            Callable(text, replace_specs | None, preserve_specs | None) -> str.
-            Regex-based transformation (delete/replace with preserve-exceptions).
-        slice_lines:
-            Callable(raw_lines, begin, total, keep_header) -> List[str].
-            Performs range slicing with optional header retention.
-        clean_lines:
-            Callable(lines, ext, rm_simple=..., rm_all=..., rm_imp=..., rm_exp=..., keep_blank=...) -> List[str].
-            Applies comment/import/export/blank filtering based on file suffix.
-        header_delim:
-            Banner delimiter string, e.g. "===== ".
-        seen_files:
-            Set of header paths already emitted (dedup across contexts/units).
-        logger:
-            Optional logger; defaults to module logger.
-        """
         self._read_file_as_lines = read_file_as_lines
         self._apply_replacements = apply_replacements
         self._slice = slice_lines
@@ -70,6 +45,9 @@ class WalkerAppender:
         self._SEEN_FILES = seen_files
         self._log = logger or logging.getLogger("ghconcat.walker")
 
+    # --------------------------------------------------------------------- #
+    # Discovery
+    # --------------------------------------------------------------------- #
     def gather_files(
         self,
         add_path: List[Path],
@@ -77,25 +55,16 @@ class WalkerAppender:
         suffixes: List[str],
         exclude_suf: List[str],
     ) -> List[Path]:
-        """
-        Walk *add_path* and return every file that matches inclusion/exclusion
-        rules. Explicit files always win. Hidden files and .pyc/.pyo are skipped.
-
-        Semantics are intentionally identical to the legacy _gather_files().
-        """
+        """Collect files from 'add_path' honoring exclude lists & suffix filters."""
         collected: Set[Path] = set()
-
         explicit_files = [p for p in add_path if p.is_file()]
         dir_paths = [p for p in add_path if not p.is_file()]
 
-        suffixes = [s if s.startswith(".") else f".{s}" for s in suffixes]
-        exclude_suf = [s if s.startswith(".") else f".{s}" for s in exclude_suf]
-        excl_set = set(exclude_suf) - set(suffixes)
-
+        inc_set, exc_set = compute_suffix_filters(suffixes, exclude_suf)
         ex_dirs = {d.resolve() for d in exclude_dirs}
 
         def _dir_excluded(path: Path) -> bool:
-            return any(_is_within(path, ex) for ex in ex_dirs)
+            return any((is_within_dir(path, ex) for ex in ex_dirs))
 
         for fp in explicit_files:
             collected.add(fp.resolve())
@@ -105,24 +74,84 @@ class WalkerAppender:
                 self._log.error("⚠  %s does not exist – skipped", root)
                 continue
             for dirpath, dirnames, filenames in os.walk(root):
+                # Skip hidden dirs and excluded dirs early
                 dirnames[:] = [
                     d
                     for d in dirnames
-                    if not d.startswith(".") and not _dir_excluded(Path(dirpath, d))
+                    if not d.startswith(".") and (not _dir_excluded(Path(dirpath, d)))
                 ]
                 for fn in filenames:
                     fp = Path(dirpath, fn)
-                    if _hidden(fp) or _dir_excluded(fp):
+                    if is_hidden_path(fp) or _dir_excluded(fp):
                         continue
-                    if suffixes and not any(fp.name.endswith(s) for s in suffixes):
-                        continue
-                    if any(fp.name.endswith(s) for s in excl_set):
+                    if not is_suffix_allowed(fp.name, inc_set, exc_set):
                         continue
                     if fp.name.endswith((".pyc", ".pyo")):
                         continue
                     collected.add(fp.resolve())
 
         return sorted(collected, key=str)
+
+    # --------------------------------------------------------------------- #
+    # Preparation & Concatenation
+    # --------------------------------------------------------------------- #
+    def _prepare_body_lines(
+        self, *, raw_lines: List[str], ns: argparse.Namespace, ext: str, file_path: Path
+    ) -> List[str]:
+        """Apply comment/doc stripping, cleaning & slicing to a file body."""
+        lines: List[str] = list(raw_lines)
+
+        rm_enabled: bool = self.should_remove_comments(ns)
+        if rm_enabled:
+            if ext == ".py":
+                src = "".join(lines)
+                stripped = strip_comments_and_docstrings(
+                    src, language="py", filename=str(file_path)
+                )
+                lines = stripped.splitlines(True)
+            elif ext == ".dart":
+                src = "".join(lines)
+                stripped = strip_dart_comments(src)
+                lines = stripped.splitlines(True)
+            else:
+                lines = self._clean(
+                    lines,
+                    ext,
+                    rm_comments=True,
+                    no_rm_comments=True,
+                    rm_imp=False,
+                    rm_exp=False,
+                    keep_blank=True,
+                )
+
+        if getattr(ns, "rm_import", False) or getattr(ns, "rm_export", False):
+            lines = self._clean(
+                lines,
+                ext,
+                rm_comments=False,
+                no_rm_comments=False,
+                rm_imp=getattr(ns, "rm_import", False),
+                rm_exp=getattr(ns, "rm_export", False),
+                keep_blank=True,
+            )
+
+        lines = self._clean(
+            lines,
+            ext,
+            rm_comments=False,
+            no_rm_comments=False,
+            rm_imp=False,
+            rm_exp=False,
+            keep_blank=getattr(ns, "keep_blank", True),
+        )
+
+        lines = self._slice(
+            lines,
+            getattr(ns, "first_line", None),
+            getattr(ns, "total_lines", None),
+            getattr(ns, "keep_header", False),
+        )
+        return lines
 
     def concat_files(
         self,
@@ -132,68 +161,66 @@ class WalkerAppender:
         header_root: Path,
         wrapped: Optional[List[Tuple[str, str]]] = None,
     ) -> str:
-        """
-        Concatenate *files* applying slicing, cleaning, header emission, optional
-        wrapping and the replace/preserve engine. Behavior is identical to the
-        legacy _concat_files() function, with the only change that HTML
-        textification is now delegated to the ReaderRegistry (via a pluggable
-        HtmlToTextReader) instead of being handled here.
-        """
+        """Concatenate processed files into a single string (optionally wrapped)."""
         parts: List[str] = []
 
         for idx, fp in enumerate(files):
             ext = fp.suffix.lower()
-
             raw_lines = self._read_file_as_lines(fp)
-
-            if fp.suffix.lower() == ".pdf":
-                ext = ""
-
-            body_lines = self._clean(
-                self._slice(raw_lines, ns.first_line, ns.total_lines, ns.keep_header),
-                ext,
-                rm_simple=ns.rm_simple or ns.rm_all,
-                rm_all=ns.rm_all,
-                rm_imp=ns.rm_import,
-                rm_exp=ns.rm_export,
-                keep_blank=ns.keep_blank,
-            )
 
             if ns.list_only:
                 rel = str(fp) if ns.absolute_path else os.path.relpath(fp, header_root)
                 parts.append(rel + "\n")
                 continue
 
+            body_lines = self._prepare_body_lines(
+                raw_lines=raw_lines, ns=ns, ext=ext, file_path=fp
+            )
             if not body_lines or not "".join(body_lines).strip():
                 continue
 
             hdr_path = str(fp) if ns.absolute_path else os.path.relpath(fp, header_root)
 
-            if not ns.skip_headers and hdr_path not in self._SEEN_FILES:
+            if (not ns.skip_headers) and (hdr_path not in self._SEEN_FILES):
                 parts.append(f"{self._HEADER_DELIM}{hdr_path} {self._HEADER_DELIM}\n")
                 self._SEEN_FILES.add(hdr_path)
 
             body = "".join(body_lines)
-
             body = self._apply_replacements(
                 body,
                 getattr(ns, "replace_rules", None),
                 getattr(ns, "preserve_rules", None),
             )
-
             parts.append(body)
 
             if wrapped is not None:
                 wrapped.append((hdr_path, body.rstrip()))
 
+            # Keep a trailing newline between files unless the slice ended exactly.
             if ns.keep_blank and (
                 idx < len(files) - 1
-                or (
-                    idx == len(files) - 1
-                    and ns.total_lines is None
-                    and ns.first_line is None
-                )
+                or (idx == len(files) - 1 and ns.total_lines is None and (ns.first_line is None))
             ):
                 parts.append("\n")
 
         return "".join(parts)
+
+    # --------------------------------------------------------------------- #
+    # Static utilities
+    # --------------------------------------------------------------------- #
+    @staticmethod
+    def should_remove_comments(ns: Any) -> bool:
+        """True if comment removal is effectively enabled for the current flags.
+
+        Mirrors the legacy module-level behavior while living close to its only
+        caller, improving cohesion.
+
+        Args:
+            ns: Namespace-like object (argparse.Namespace or compatible).
+
+        Returns:
+            True if simple comment removal should be applied.
+        """
+        return bool(getattr(ns, "rm_comments", False)) and (
+            not bool(getattr(ns, "no_rm_comments", False))
+        )

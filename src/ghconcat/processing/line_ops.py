@@ -47,6 +47,8 @@ class LineProcessingService:
         self._rules = comment_rules
         self._line1_re = line1_re
         self._log = logger or logging.getLogger("ghconcat.lineops")
+        # Precompile blank-line regex once (micro-optimization; behavior unchanged).
+        self._re_blank = re.compile(r"^\s*$")
 
     def slice_lines(
         self,
@@ -76,8 +78,8 @@ class LineProcessingService:
         lines: Iterable[str],
         ext: str,
         *,
-        rm_simple: bool,
-        rm_all: bool,
+        rm_comments: bool,
+        no_rm_comments: bool,
         rm_imp: bool,
         rm_exp: bool,
         keep_blank: bool,
@@ -91,20 +93,18 @@ class LineProcessingService:
         import_rx = rules[2] if rules else None
         export_rx = rules[3] if rules else None
 
-        re_blank = re.compile(r"^\s*$")
-
         for ln in lines:
             if rules:
-                if rm_all and full_rx and full_rx.match(ln):
+                if no_rm_comments and full_rx and full_rx.match(ln):
                     continue
-                if rm_simple and simple_rx and simple_rx.match(ln):
+                if rm_comments and simple_rx and simple_rx.match(ln):
                     continue
                 if rm_imp and import_rx and import_rx.match(ln):
                     continue
                 if rm_exp and export_rx and export_rx.match(ln):
                     continue
 
-            if not keep_blank and re_blank.match(ln):
+            if not keep_blank and self._re_blank.match(ln):
                 continue
 
             out.append(ln)

@@ -20,20 +20,20 @@ class WalkerProtocol(Protocol):
     """Contract for filesystem walking and concatenation."""
 
     def gather_files(
-        self,
-        add_path: List[Path],
-        exclude_dirs: List[Path],
-        suffixes: List[str],
-        exclude_suf: List[str],
+            self,
+            add_path: List[Path],
+            exclude_dirs: List[Path],
+            suffixes: List[str],
+            exclude_suf: List[str],
     ) -> List[Path]:
         """Enumerate files honoring include/exclude rules and suffix filters."""
 
     def concat_files(
-        self,
-        files: List[Path],
-        ns: argparse.Namespace,
-        *,
-        header_root: Path,
-        wrapped: Optional[List[Tuple[str, str]]] = None,
+            self,
+            files: List[Path],
+            ns: argparse.Namespace,
+            *,
+            header_root: Path,
+            wrapped: Optional[List[Tuple[str, str]]] = None,
     ) -> str:
         """Concatenate files according to CLI-like flags in *ns*."""

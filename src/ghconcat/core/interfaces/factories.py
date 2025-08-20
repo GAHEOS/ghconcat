@@ -7,8 +7,6 @@ composition (e.g., EngineBuilder) can accept pluggable factories without
 depending on concrete implementations.
 """
 
-from __future__ import annotations
-
 import logging
 from typing import Callable, Optional, Protocol, Set, runtime_checkable
 

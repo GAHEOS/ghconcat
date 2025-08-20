@@ -1,37 +1,29 @@
-# src/ghconcat/core/__init__.py
 """
 ghconcat.core – Stable DI contracts (Protocols & factories).
 
-This package centralizes thin, dependency-free interfaces that higher-level
-components depend on. It intentionally re-exports protocol/factory artifacts
-from the canonical modules to avoid behavioral drift while clarifying the
-architectural boundaries:
-
-    • ghconcat.core.git  → Git-related Protocols & default factory
-    • ghconcat.core.url  → URL-related Protocols & default factory
-    • ghconcat.core.interfaces.* → Canonical Protocols
-    • ghconcat.rendering.factories → Default factories (Walker/Renderer/PathResolver)
+This module provides a flat, unified import surface for core Protocols and
+default factories, avoiding layered re-exports and keeping consistency with
+the rest of the codebase.
 """
 
-from .git import (
+from ghconcat.core.interfaces.git import (
     GitRepositoryManagerProtocol,
     GitManagerFactoryProtocol,
-    DefaultGitManagerFactory,
 )
-from .url import (
+from ghconcat.discovery.git_manager import DefaultGitManagerFactory
+
+from ghconcat.core.interfaces.net import (
     UrlFetcherProtocol,
     UrlFetcherFactoryProtocol,
-    DefaultUrlFetcherFactory,
 )
+from ghconcat.discovery.url_fetcher import DefaultUrlFetcherFactory
 
-# New DI factory protocols
 from ghconcat.core.interfaces.factories import (
     WalkerFactoryProtocol,
     RendererFactoryProtocol,
     PathResolverFactoryProtocol,
 )
 
-# Default factories for rendering/path resolver
 from ghconcat.rendering.factories import (
     DefaultWalkerFactory,
     DefaultRendererFactory,
@@ -45,7 +37,6 @@ __all__ = [
     "UrlFetcherProtocol",
     "UrlFetcherFactoryProtocol",
     "DefaultUrlFetcherFactory",
-    # New DI artifacts
     "WalkerFactoryProtocol",
     "RendererFactoryProtocol",
     "PathResolverFactoryProtocol",

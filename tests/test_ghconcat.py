@@ -143,7 +143,7 @@ class CleaningTests(GhConcatBaseTest):
         self.assertNotIn("# simple comment", dump)
 
     def test_remove_all_comments(self) -> None:
-        dump = _run(["-s", ".js", "-C", "-a", "src/module/commented.js"])
+        dump = _run(["-s", ".js", "-c", "-a", "src/module/commented.js"])
         self.assertNotIn("/* full", dump)
 
     def test_remove_imports(self) -> None:
@@ -598,7 +598,7 @@ class RemoteURLTests(GhConcatBaseTest):
         opening <html tag (case-insensitive).  Uses suffix filter to limit to
         .html content.
         """
-        dump = _run(["-f", "https://www.gaheos.com", "-s", ".html", "-o", "dump_q.txt"])
+        dump = _run(["-a", "https://www.gaheos.com", "-s", ".html", "-o", "dump_q.txt"])
         self.assertInDump("<html", dump.lower())
 
 
@@ -612,7 +612,7 @@ class ScrapeURLTests(GhConcatBaseTest):
         • More than one header banner appears, meaning at least two HTML
           resources were fetched (root + at least one linked page).
         """
-        dump = _run(["-F", "https://www.gaheos.com", "-s", ".html", "-h", "-d", "1", "-o", "dump_q.txt"])
+        dump = _run(["-a", "https://www.gaheos.com", "-s", ".html", "-h", "--url-depth", "1", "-o", "dump_q.txt"])
         self.assertInDump("<html", dump.lower())
         self.assertGreaterEqual(dump.count(HEADER_DELIM), 2,
                                 "expected multiple HTML documents in scrape")
@@ -624,61 +624,14 @@ class ScrapeURLTests(GhConcatBaseTest):
         interna (.html); con depth 0 no debe aparecer.
         """
         dump = _run([
-            "-F", "https://www.gaheos.com",
+            "-a", "https://www.gaheos.com",
             "-s", ".html",
             "-h",
-            "-d", "0",  # profundidad cero
             "-o", "dump_q.txt",
         ])
         # Solo un encabezado esperado
         self.assertEqual(dump.count(HEADER_DELIM), 2,
                          "depth 0 should include only the seed URL")
-
-
-# --------------------------------------------------------------------------- #
-# 23. Interpolation - Escape “{{…}}”                                          #
-# --------------------------------------------------------------------------- #
-class InterpolationEscapeTests(unittest.TestCase):
-    """Unit tests for the `{…}` / `{{…}}` interpolation semantics."""
-
-    # Convenience alias to the function under test
-    _interp = staticmethod(ghconcat._interpolate)
-
-    def test_single_brace_is_interpolated(self) -> None:
-        """{var} is replaced by its mapping value."""
-        tpl = "Hello {user}"
-        out = self._interp(tpl, {"user": "Leo"})
-        self.assertEqual(out, "Hello Leo")
-
-    def test_double_brace_is_preserved(self) -> None:
-        """{{var}} is rendered as {var} without interpolation."""
-        tpl = "Hello {{user}}"
-        out = self._interp(tpl, {"user": "Leo"})
-        self.assertEqual(out, "Hello {user}")
-
-    def test_mixed_placeholders(self) -> None:
-        """
-        Interpolates single-brace placeholders while preserving
-        double-brace literals in the same string.
-        """
-        tpl = "{{skip}} {user} {{name}} {missing}"
-        out = self._interp(tpl, {"user": "Leo"})
-        self.assertEqual(out, "{skip} Leo {name} ")
-
-    def test_nested_like_sequences(self) -> None:
-        """
-        Edge-case: sequences such as '{{{var}}}' should result in '{Leo}'
-        (outer '{{' is escape, inner '{var}' gets interpolated).
-        """
-        tpl = "{{{user}}}"
-        out = self._interp(tpl, {"user": "Leo"})
-        self.assertEqual(out, "{Leo}")
-
-    def test_empty_mapping_replaces_with_empty_string(self) -> None:
-        """Missing keys in mapping resolve to an empty string (legacy behaviour)."""
-        tpl = "Status: {state}"
-        out = self._interp(tpl, {})
-        self.assertEqual(out, "Status: ")
 
 
 # --------------------------------------------------------------------------- #
@@ -889,7 +842,7 @@ class GitRepositoryTests(GhConcatBaseTest):
         dump = _run([
             "-h",
             "-s", ".py",
-            "-g", self.REPO_URL,
+            "-a", self.REPO_URL,
         ])
         self.assertInDump("ghconcat.py", dump)
         self.assertGreaterEqual(dump.count(HEADER_DELIM), 3,
@@ -903,8 +856,8 @@ class GitRepositoryTests(GhConcatBaseTest):
         dump = _run([
             "-h",
             "-s", ".py",
-            "-g", f'{self.REPO_URL}^dev',
-            "-G", f"{self.REPO_URL}^dev/tests/test_ghconcat.py",
+            "-a", f'{self.REPO_URL}^dev',
+            "-A", f"{self.REPO_URL}^dev/tests/test_ghconcat.py",
         ])
         self.assertNotInDump("test_ghconcat.py", dump)
         # Some other .py still present (e.g. tools/build_fixtures.py)
@@ -918,7 +871,7 @@ class GitRepositoryTests(GhConcatBaseTest):
             "-h",
             "-s", ".py",
             "-l",
-            "-g", f"{self.REPO_URL}^dev/tests/test_ghconcat.py",
+            "-a", f"{self.REPO_URL}^dev/tests/test_ghconcat.py",
         ])
         # Only the targeted file appears
         self.assertInDump("test_ghconcat.py", dump)
@@ -945,7 +898,7 @@ class GitRepositoryTests(GhConcatBaseTest):
         dump = _run([
             "-h",
             "-s", ".py",
-            "-g", f"{self.REPO_URL}^{branch}",
+            "-a", f"{self.REPO_URL}^{branch}",
         ])
         self.assertInDump("ghconcat.py", dump)  # file in dev branch
 

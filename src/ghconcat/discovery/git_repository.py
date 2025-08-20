@@ -5,6 +5,8 @@ from hashlib import sha1
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from ghconcat.utils.suffixes import compute_suffix_filters, is_suffix_allowed
+
 
 class GitRepositoryManager:
     """High-level Git repository handler for ghconcat.
@@ -51,9 +53,6 @@ class GitRepositoryManager:
         self._log = logger or logging.getLogger("ghconcat.git")
         self._clones = clones_cache if clones_cache is not None else {}
 
-    # --------------------------------------------------------------------- #
-    # Public API
-    # --------------------------------------------------------------------- #
     @staticmethod
     def parse_spec(spec: str) -> Tuple[str, Optional[str], Optional[str]]:
         """Parse a ``-g/-G`` SPEC into (repo_url, branch, sub_path).
@@ -191,8 +190,8 @@ class GitRepositoryManager:
         include_roots: list[Path] = []
         exclude_roots: list[Path] = []
 
-        incl_suf = {s if s.startswith(".") else f".{s}" for s in suffixes}
-        excl_suf = {s if s.startswith(".") else f".{s}" for s in exclude_suf} - incl_suf
+        # Unified suffix handling (include > exclude)
+        inc_set, exc_set = compute_suffix_filters(suffixes, exclude_suf)
 
         for spec in git_specs:
             repo, branch, sub = self.parse_spec(spec)
@@ -208,11 +207,7 @@ class GitRepositoryManager:
         excl_dirs = {p.resolve() for p in exclude_roots if p.is_dir()}
 
         def _skip_suffix(p: Path) -> bool:
-            if incl_suf and not any(p.name.endswith(s) for s in incl_suf):
-                return True
-            if any(p.name.endswith(s) for s in excl_suf):
-                return True
-            return False
+            return not is_suffix_allowed(p.name, inc_set, exc_set)
 
         collected: set[Path] = set()
 
@@ -231,7 +226,6 @@ class GitRepositoryManager:
                 continue
 
             for dirpath, dirnames, filenames in os.walk(root):
-                # Keep everything (including hidden) except '.git'
                 dirnames[:] = [
                     d
                     for d in dirnames
@@ -249,10 +243,6 @@ class GitRepositoryManager:
                     collected.add(fp.resolve())
 
         return sorted(collected, key=str)
-
-
-# --- local utilities ------------------------------------------------------- #
-# We avoid importing urllib at top-level to keep surface small.
 
 
 def _urlparse(url: str):

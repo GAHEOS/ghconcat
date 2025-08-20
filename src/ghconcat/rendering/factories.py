@@ -6,8 +6,6 @@ callers can inject them via Protocol-based factories without importing
 implementation details at the composition sites.
 """
 
-from __future__ import annotations
-
 import logging
 from typing import Callable, Optional, Set
 

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from ghconcat.parsing.flags import VALUE_FLAGS as _VALUE_FLAGS
+from ghconcat.parsing.attr_sets import _VALUE_FLAGS
 from ghconcat.parsing.tokenize import tokenize_directive_line
 
 

@@ -27,7 +27,7 @@ needing identical semantics.
 import shlex
 from typing import List, Optional
 
-from ghconcat.parsing.flags import VALUE_FLAGS as _VALUE_FLAGS
+from ghconcat.parsing.attr_sets import _VALUE_FLAGS
 
 
 def _strip_inline_comments(line: str) -> str:
