@@ -6,37 +6,56 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
-from ghconcat.core.interfaces.net import (
-    HTTPTransportProtocol,
-    UrlFetcherFactoryProtocol,
-    UrlFetcherProtocol,
-)
+from ghconcat.core.interfaces.net import HTTPTransportProtocol, UrlFetcherFactoryProtocol, UrlFetcherProtocol
 from ghconcat.core.models import FetchRequest
 from ghconcat.net.urllib_transport import UrllibHTTPTransport
 from ghconcat.utils.mime import extract_ext_from_url_path, infer_extension, is_binary_mime
 from ghconcat.utils.suffixes import compute_suffix_filters, is_suffix_allowed
 
 
-class UrlFetcher:
-    """Fetch and scrape remote resources with local caching.
-
-    Responsibilities:
-      - Download single URLs (fetch)
-      - Breadth-first scrape HTML pages (scrape)
-      - Decide stable local filenames with meaningful extensions
-      - Skip unwanted suffixes for binary payloads when scraping
-    """
+class UrlFetcher(UrlFetcherProtocol):
+    """Fetches and optionally scrapes URLs into a workspace-local cache."""
 
     _DEFAULT_UA = "ghconcat/2.0 (+https://gaheos.com)"
 
+    # Class-level constants to avoid re-allocating sets per instance
+    _TEXT_EXT = {
+        ".html", ".htm", ".xhtml", ".md", ".markdown", ".txt", ".text",
+        ".css", ".scss", ".less", ".js", ".mjs", ".ts", ".tsx", ".jsx",
+        ".json", ".jsonc", ".yaml", ".yml", ".xml", ".svg", ".csv", ".tsv",
+        ".py", ".rb", ".php", ".pl", ".pm", ".go", ".rs", ".java", ".c",
+        ".cpp", ".cc", ".h", ".hpp", ".sh", ".bash", ".zsh", ".ps1", ".r", ".lua",
+    }
+    _BINARY_EXT = {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tiff", ".avif",
+        ".mp4", ".m4v", ".mov", ".webm", ".ogv", ".flv",
+        ".mp3", ".ogg", ".oga", ".wav", ".flac",
+        ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+        ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z",
+    }
+    _WELL_KNOWN_EXT = _TEXT_EXT | _BINARY_EXT
+    _MIME_FALLBACK = {
+        "text/html": ".html",
+        "application/json": ".json",
+        "application/javascript": ".js",
+        "text/css": ".css",
+        "text/plain": ".txt",
+        "text/xml": ".xml",
+    }
+
+    # Compiled once per class
+    import re as _re
+    _HREF_RE = _re.compile(r'href=["\\\']?([^"\\\' >]+)', _re.I)
+
     def __init__(
-            self,
-            cache_root: Path,
-            *,
-            logger: Optional[logging.Logger] = None,
-            user_agent: str = _DEFAULT_UA,
-            ssl_ctx_provider: Optional[Callable[[str], Optional[object]]] = None,
-            transport: Optional[HTTPTransportProtocol] = None,
+        self,
+        cache_root: Path,
+        *,
+        logger: Optional[logging.Logger] = None,
+        user_agent: str = _DEFAULT_UA,
+        ssl_ctx_provider: Optional[Callable[[str], Optional[object]]] = None,
+        transport: Optional[HTTPTransportProtocol] = None,
     ) -> None:
         self._workspace = cache_root
         self._cache_dir = self._workspace / ".ghconcat_urlcache"
@@ -48,127 +67,26 @@ class UrlFetcher:
             user_agent=self._ua, ssl_ctx_provider=self._ssl_ctx_for
         )
 
-        # Known extensions for quick filtering during scraping
-        self._TEXT_EXT = {
-            ".html",
-            ".htm",
-            ".xhtml",
-            ".md",
-            ".markdown",
-            ".txt",
-            ".text",
-            ".css",
-            ".scss",
-            ".less",
-            ".js",
-            ".mjs",
-            ".ts",
-            ".tsx",
-            ".jsx",
-            ".json",
-            ".jsonc",
-            ".yaml",
-            ".yml",
-            ".xml",
-            ".svg",
-            ".csv",
-            ".tsv",
-            ".py",
-            ".rb",
-            ".php",
-            ".pl",
-            ".pm",
-            ".go",
-            ".rs",
-            ".java",
-            ".c",
-            ".cpp",
-            ".cc",
-            ".h",
-            ".hpp",
-            ".sh",
-            ".bash",
-            ".zsh",
-            ".ps1",
-            ".r",
-            ".lua",
-        }
-        self._BINARY_EXT = {
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".gif",
-            ".webp",
-            ".bmp",
-            ".ico",
-            ".tiff",
-            ".avif",
-            ".mp4",
-            ".m4v",
-            ".mov",
-            ".webm",
-            ".ogv",
-            ".flv",
-            ".mp3",
-            ".ogg",
-            ".oga",
-            ".wav",
-            ".flac",
-            ".woff",
-            ".woff2",
-            ".ttf",
-            ".otf",
-            ".eot",
-            ".pdf",
-            ".doc",
-            ".docx",
-            ".ppt",
-            ".pptx",
-            ".xls",
-            ".xlsx",
-            ".zip",
-            ".tar",
-            ".gz",
-            ".tgz",
-            ".bz2",
-            ".xz",
-            ".7z",
-        }
-        self._WELL_KNOWN_EXT = self._TEXT_EXT | self._BINARY_EXT
-
-        # Explicit overrides for common textual MIME types
-        self._MIME_FALLBACK = {
-            "text/html": ".html",
-            "application/json": ".json",
-            "application/javascript": ".js",
-            "text/css": ".css",
-            "text/plain": ".txt",
-            "text/xml": ".xml",
-        }
-
-        # Lightweight href extractor for HTML pages
-        import re as _re
-
-        self._href_re = _re.compile(r'href=["\\\']?([^"\\\' >]+)', _re.I)
-
     def _http_get(self, url: str, *, timeout: float = 30.0) -> tuple[bytes, str, str]:
         resp = self._http.request(
-            FetchRequest(method="GET", url=url, headers={"User-Agent": self._ua}, timeout=timeout)
+            FetchRequest(
+                method="GET",
+                url=url,
+                headers={"User-Agent": self._ua},
+                timeout=timeout,
+            )
         )
         ctype = (resp.headers.get("Content-Type", "") or "").split(";", 1)[0].strip()
         return (resp.body, ctype, resp.final_url)
 
     def _decide_local_name(self, url: str, idx: int, ctype: str, *, mode: str) -> str:
-        """Return a deterministic local filename for the downloaded resource.
+        """Choose a local filename based on URL path and content type.
 
         Args:
-            url: The requested URL.
-            idx: Numeric index used to disambiguate names.
-            ctype: Content-Type without parameters.
-            mode: 'fetch' or 'scrape' to tailor heuristics slightly.
-
-        Returns:
-            A filename including a reasonably inferred extension.
+            url: Original URL.
+            idx: Sequential index for uniqueness.
+            ctype: Response Content-Type.
+            mode: 'fetch' for direct downloads or 'scrape' for crawled links.
         """
         from urllib.parse import urlparse
 
@@ -176,12 +94,12 @@ class UrlFetcher:
         url_ext = extract_ext_from_url_path(name)
 
         if mode == "fetch":
-            # For single fetch, if the name has no dot at all, force an extension.
+            # Preserve name; ensure there is an extension
             if "." not in name:
                 name += infer_extension(ctype, name, default=".html", fallback=self._MIME_FALLBACK)
             return name
 
-        # Scrape mode: if extension is missing or unknown, append an inferred one.
+        # Scrape mode: normalize unknown extensions
         if not url_ext or url_ext not in self._WELL_KNOWN_EXT:
             inferred = infer_extension(ctype, name, default=".html", fallback=self._MIME_FALLBACK)
             if not name.lower().endswith(inferred):
@@ -189,7 +107,7 @@ class UrlFetcher:
         return name
 
     def fetch(self, urls: Sequence[str]) -> List[Path]:
-        """Download a list of URLs into the cache directory, no recursion."""
+        """Fetch a list of URLs and persist them into the URL cache directory."""
         out: List[Path] = []
         for idx, link in enumerate(urls):
             try:
@@ -204,15 +122,19 @@ class UrlFetcher:
         return out
 
     def scrape(
-            self,
-            seeds: Sequence[str],
-            *,
-            suffixes: Sequence[str],
-            exclude_suf: Sequence[str],
-            max_depth: int = 2,
-            same_host_only: bool = True,
+        self,
+        seeds: Sequence[str],
+        *,
+        suffixes: Sequence[str],
+        exclude_suf: Sequence[str],
+        max_depth: int = 2,
+        same_host_only: bool = True,
     ) -> List[Path]:
-        """Breadth-first crawl starting from seeds, saving HTML and allowed assets."""
+        """Breadth-first scrape following <a href> links.
+
+        Respects suffix allow/deny lists both before downloading (by extension)
+        and after (by content-type).
+        """
         from urllib.parse import urljoin, urlparse
 
         include_set, exclude_set = compute_suffix_filters(suffixes, exclude_suf)
@@ -231,6 +153,7 @@ class UrlFetcher:
             if url in visited or depth > max_depth:
                 continue
             visited.add(url)
+
             if _pre_download_skip(url):
                 continue
 
@@ -249,8 +172,8 @@ class UrlFetcher:
                 self._log.error("⚠  could not save %s: %s", url, exc)
                 continue
 
-            # If binary, keep only if suffix is allowed, otherwise discard.
             if is_binary_mime(ctype):
+                # Enforce suffix filters post-download for binaries
                 if not is_suffix_allowed(dst.name, include_set, exclude_set):
                     try:
                         dst.unlink(missing_ok=True)
@@ -260,12 +183,11 @@ class UrlFetcher:
 
             out_paths.append(dst)
 
-            # Queue next links if HTML and within depth limit
             if ctype.startswith("text/html") and depth < max_depth:
                 try:
                     html_txt = body.decode("utf-8", "ignore")
                     base_host = urlparse(url)
-                    for link in self._href_re.findall(html_txt):
+                    for link in self._HREF_RE.findall(html_txt):
                         abs_url = urljoin(url, html.unescape(link))
                         if same_host_only and urlparse(abs_url)[:2] != base_host[:2]:
                             continue
@@ -273,12 +195,15 @@ class UrlFetcher:
                             continue
                         queue.append((abs_url, depth + 1))
                 except Exception:
+                    # Robust against malformed pages
                     pass
 
         return out_paths
 
 
 class DefaultUrlFetcherFactory(UrlFetcherFactoryProtocol):
+    """Factory with an overridable builder callable."""
+
     def __init__(self, builder: Callable[[Path], UrlFetcherProtocol]) -> None:
         self._builder = builder
 

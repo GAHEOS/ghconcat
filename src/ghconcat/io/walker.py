@@ -14,16 +14,10 @@ from ghconcat.utils.paths import is_hidden_path, is_within_dir
 
 
 class WalkerAppender(WalkerProtocol):
-    """File concatenation and pre-processing pipeline.
+    """Concatenates files after walking directories and applying line-level transforms.
 
-    Responsibilities:
-      * Discover files under given roots honoring include/exclude suffix filters.
-      * Prepare file bodies (slicing, cleaning, comment/document stripping).
-      * Concatenate into a single text result, optionally wrapping segments.
-
-    Design notes:
-      * All heavy-lifting operations are injected (read/slice/clean/apply),
-        keeping this class cohesive and testable.
+    This implementation keeps behavior compatible with existing tests while
+    reducing duplication and improving readability.
     """
 
     def __init__(
@@ -45,9 +39,6 @@ class WalkerAppender(WalkerProtocol):
         self._SEEN_FILES = seen_files
         self._log = logger or logging.getLogger("ghconcat.walker")
 
-    # --------------------------------------------------------------------- #
-    # Discovery
-    # --------------------------------------------------------------------- #
     def gather_files(
         self,
         add_path: List[Path],
@@ -55,7 +46,7 @@ class WalkerAppender(WalkerProtocol):
         suffixes: List[str],
         exclude_suf: List[str],
     ) -> List[Path]:
-        """Collect files from 'add_path' honoring exclude lists & suffix filters."""
+        """Collect files matching suffix rules while honoring hidden/exclude lists."""
         collected: Set[Path] = set()
         explicit_files = [p for p in add_path if p.is_file()]
         dir_paths = [p for p in add_path if not p.is_file()]
@@ -74,11 +65,8 @@ class WalkerAppender(WalkerProtocol):
                 self._log.error("⚠  %s does not exist – skipped", root)
                 continue
             for dirpath, dirnames, filenames in os.walk(root):
-                # Skip hidden dirs and excluded dirs early
                 dirnames[:] = [
-                    d
-                    for d in dirnames
-                    if not d.startswith(".") and (not _dir_excluded(Path(dirpath, d)))
+                    d for d in dirnames if not d.startswith(".") and (not _dir_excluded(Path(dirpath, d)))
                 ]
                 for fn in filenames:
                     fp = Path(dirpath, fn)
@@ -89,31 +77,41 @@ class WalkerAppender(WalkerProtocol):
                     if fp.name.endswith((".pyc", ".pyo")):
                         continue
                     collected.add(fp.resolve())
-
         return sorted(collected, key=str)
 
-    # --------------------------------------------------------------------- #
-    # Preparation & Concatenation
-    # --------------------------------------------------------------------- #
-    def _prepare_body_lines(
-        self, *, raw_lines: List[str], ns: argparse.Namespace, ext: str, file_path: Path
+    # ---------------------------
+    # Internal cleaning pipeline
+    # ---------------------------
+    def _apply_cleaning_pipeline(
+        self,
+        *,
+        raw_lines: List[str],
+        ns: argparse.Namespace,
+        ext: str,
+        file_path: Path,
     ) -> List[str]:
-        """Apply comment/doc stripping, cleaning & slicing to a file body."""
+        """Apply the full cleaning pipeline (comments/import/export/blank) preserving behavior.
+
+        The sequence matches the previous logic to ensure test compatibility:
+        1) Strip comments (language-specific if available).
+        2) Conditionally remove import/export lines.
+        3) Apply generic clean pass (blank line handling).
+        """
         lines: List[str] = list(raw_lines)
 
+        # 1) Comments removal (language-aware where possible).
         rm_enabled: bool = self.should_remove_comments(ns)
         if rm_enabled:
             if ext == ".py":
                 src = "".join(lines)
-                stripped = strip_comments_and_docstrings(
-                    src, language="py", filename=str(file_path)
-                )
+                stripped = strip_comments_and_docstrings(src, language="py", filename=str(file_path))
                 lines = stripped.splitlines(True)
             elif ext == ".dart":
                 src = "".join(lines)
                 stripped = strip_dart_comments(src)
                 lines = stripped.splitlines(True)
             else:
+                # Non-language-specific comment removal via line rules
                 lines = self._clean(
                     lines,
                     ext,
@@ -124,6 +122,7 @@ class WalkerAppender(WalkerProtocol):
                     keep_blank=True,
                 )
 
+        # 2) Import / export removal if requested.
         if getattr(ns, "rm_import", False) or getattr(ns, "rm_export", False):
             lines = self._clean(
                 lines,
@@ -135,6 +134,7 @@ class WalkerAppender(WalkerProtocol):
                 keep_blank=True,
             )
 
+        # 3) Final cleaning pass for blank line policy (keep/strip).
         lines = self._clean(
             lines,
             ext,
@@ -144,7 +144,20 @@ class WalkerAppender(WalkerProtocol):
             rm_exp=False,
             keep_blank=getattr(ns, "keep_blank", True),
         )
+        return lines
 
+    def _prepare_body_lines(
+        self,
+        *,
+        raw_lines: List[str],
+        ns: argparse.Namespace,
+        ext: str,
+        file_path: Path,
+    ) -> List[str]:
+        """Prepare file body lines by applying the cleaning pipeline and slicing."""
+        # Apply the unified cleaning pipeline
+        lines = self._apply_cleaning_pipeline(raw_lines=raw_lines, ns=ns, ext=ext, file_path=file_path)
+        # Slice after cleaning to preserve previous semantics
         lines = self._slice(
             lines,
             getattr(ns, "first_line", None),
@@ -161,9 +174,8 @@ class WalkerAppender(WalkerProtocol):
         header_root: Path,
         wrapped: Optional[List[Tuple[str, str]]] = None,
     ) -> str:
-        """Concatenate processed files into a single string (optionally wrapped)."""
+        """Concatenate files, optionally collecting wrapped bodies for code fences."""
         parts: List[str] = []
-
         for idx, fp in enumerate(files):
             ext = fp.suffix.lower()
             raw_lines = self._read_file_as_lines(fp)
@@ -180,8 +192,7 @@ class WalkerAppender(WalkerProtocol):
                 continue
 
             hdr_path = str(fp) if ns.absolute_path else os.path.relpath(fp, header_root)
-
-            if (not ns.skip_headers) and (hdr_path not in self._SEEN_FILES):
+            if not ns.skip_headers and hdr_path not in self._SEEN_FILES:
                 parts.append(f"{self._HEADER_DELIM}{hdr_path} {self._HEADER_DELIM}\n")
                 self._SEEN_FILES.add(hdr_path)
 
@@ -196,31 +207,20 @@ class WalkerAppender(WalkerProtocol):
             if wrapped is not None:
                 wrapped.append((hdr_path, body.rstrip()))
 
-            # Keep a trailing newline between files unless the slice ended exactly.
             if ns.keep_blank and (
                 idx < len(files) - 1
-                or (idx == len(files) - 1 and ns.total_lines is None and (ns.first_line is None))
+                or (
+                    idx == len(files) - 1
+                    and ns.total_lines is None
+                    and (ns.first_line is None)
+                )
             ):
                 parts.append("\n")
-
         return "".join(parts)
 
-    # --------------------------------------------------------------------- #
-    # Static utilities
-    # --------------------------------------------------------------------- #
     @staticmethod
     def should_remove_comments(ns: Any) -> bool:
-        """True if comment removal is effectively enabled for the current flags.
-
-        Mirrors the legacy module-level behavior while living close to its only
-        caller, improving cohesion.
-
-        Args:
-            ns: Namespace-like object (argparse.Namespace or compatible).
-
-        Returns:
-            True if simple comment removal should be applied.
-        """
+        """Return True when comment removal is active."""
         return bool(getattr(ns, "rm_comments", False)) and (
             not bool(getattr(ns, "no_rm_comments", False))
         )

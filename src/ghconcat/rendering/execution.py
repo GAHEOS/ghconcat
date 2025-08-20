@@ -21,13 +21,7 @@ from ghconcat.processing.input_classifier import DefaultInputClassifier
 
 
 class ExecutionEngine:
-    """Coordinates parsing, discovery, rendering and optional AI post-processing.
-
-    The public behavior of this class is kept intact to preserve tests.
-    Internal steps are documented and a small helper was introduced to
-    centralize the `root`/`workspace` resolution logic without changing
-    semantics.
-    """
+    """Coordinates discovery, concatenation, templating and optional AI call."""
 
     def __init__(
         self,
@@ -72,6 +66,70 @@ class ExecutionEngine:
         self._strict_ws = os.getenv("GHCONCAT_STRICT_WS") == "1"
         self._classifier: InputClassifierProtocol = classifier or DefaultInputClassifier()
 
+    # ---------------------------
+    # Helpers: workspace/root
+    # ---------------------------
+    def _resolve_root_and_workspace(
+        self,
+        ns_parent: Optional[argparse.Namespace],
+        ns_self: argparse.Namespace,
+        parent_root: Optional[Path],
+        parent_workspace: Optional[Path],
+    ) -> tuple[Path, Path]:
+        """Resolve root and workspace with the exact original semantics."""
+        # root
+        if ns_parent is None:
+            base_for_root = Path.cwd()
+            root = self._resolver.resolve(base_for_root, ns_self.workdir or ".")
+        elif ns_self.workdir not in (None, ""):
+            base_for_root = parent_root or Path.cwd()
+            root = self._resolver.resolve(base_for_root, ns_self.workdir)
+        else:
+            root = parent_root or Path.cwd()
+
+        # workspace
+        if ns_parent is None:
+            if ns_self.workspace not in (None, ""):
+                workspace = self._resolver.resolve(root, ns_self.workspace)
+            else:
+                workspace = root
+        elif ns_self.workspace not in (None, ""):
+            base_ws = parent_workspace or root
+            workspace = self._resolver.resolve(base_ws, ns_self.workspace)
+        else:
+            workspace = parent_workspace or root
+
+        return (root, workspace)
+
+    def _configure_resolver_workspace(self, workspace: Path) -> None:
+        """Set the resolver workspace root if the resolver supports it."""
+        try:
+            setter = getattr(self._resolver, "set_workspace_root", None)
+            if callable(setter):
+                setter(workspace)
+        except Exception:
+            # Be lenient; workspace hinting is best-effort
+            pass
+
+    def _guard_ws(self, path: Path) -> Path:
+        """Prevent accessing files outside workspace when strict mode is enabled."""
+        if self._strict_ws and (not self._resolver.is_within_workspace(path)):
+            self._fatal(f"unsafe path outside workspace: {path}")
+            raise SystemExit(1)
+        return path
+
+    def _enter_html_reader_scope(self, ns_effective: argparse.Namespace) -> Optional[ReaderMappingScope]:
+        """Optionally map HTML suffixes to text reader when --textify-html is set."""
+        if not getattr(ns_effective, "strip_html", False):
+            return None
+        scope = ReaderMappingScope(self._registry)
+        scope.__enter__()
+        scope.register([".html", ".htm", ".xhtml"], HtmlToTextReader(logger=self._log))
+        return scope
+
+    # ---------------------------
+    # Main execution
+    # ---------------------------
     def execute_node(
         self,
         node: DirNode,
@@ -83,9 +141,9 @@ class ExecutionEngine:
         inherited_vars: Optional[Dict[str, str]] = None,
         gh_dump: Optional[List[str]] = None,
     ) -> Tuple[Dict[str, str], str]:
-        """Execute a directive node and return (variables, rendered_output)."""
         inherited_vars = inherited_vars or {}
         tokens = self._expand_tokens(node.tokens, inherited_env=inherited_vars)
+
         ns_self = self._parser_factory().parse_args(tokens)
         self._post_parse(ns_self)
         ns_effective = self._merge_ns(ns_parent, ns_self) if ns_parent else ns_self
@@ -93,23 +151,14 @@ class ExecutionEngine:
         if level == 0:
             gh_dump = []
 
-        # Resolve root/workspace exactly as before (now via a helper).
+        # Resolve root and workspace exactly as before
         root, workspace = self._resolve_root_and_workspace(
             ns_parent, ns_self, parent_root, parent_workspace
         )
-        try:
-            setter = getattr(self._resolver, "set_workspace_root", None)
-            if callable(setter):
-                setter(workspace)
-        except Exception:
-            # Best-effort; ignore resolver implementations without setter.
-            pass
+        self._configure_resolver_workspace(workspace)
 
-        def _guard_ws(path: Path) -> Path:
-            if self._strict_ws and (not self._resolver.is_within_workspace(path)):
-                self._fatal(f"unsafe path outside workspace: {path}")
-                raise SystemExit(1)
-            return path
+        def _guard(path: Path) -> Path:
+            return self._guard_ws(path)
 
         self._workspaces_seen.add(workspace)
         ns_effective.workspace = str(workspace)
@@ -121,23 +170,13 @@ class ExecutionEngine:
             self._fatal(f"--workspace {workspace} not found")
             raise SystemExit(1)
 
-        maybe_scope = None
-        if getattr(ns_effective, "strip_html", False):
-            scope = ReaderMappingScope(self._registry)
-            scope.__enter__()
-            scope.register([".html", ".htm", ".xhtml"], HtmlToTextReader(logger=self._log))
-            maybe_scope = scope
-
+        maybe_scope = self._enter_html_reader_scope(ns_effective)
         try:
             dump_raw = ""
-            # Reclassify add/exclude tokens into URLs, GIT specs, etc.
+            # Reclassify positional arguments (URLs/Git/local paths) deterministically
             self._classifier.reclassify(ns_effective)
-            if (
-                ns_effective.add_path
-                or ns_effective.git_path
-                or ns_effective.urls
-                or ns_effective.url_scrape
-            ):
+
+            if ns_effective.add_path or ns_effective.git_path or ns_effective.urls or ns_effective.url_scrape:
                 suffixes = split_list(getattr(ns_effective, "suffix", None))
                 exclude_suf = split_list(getattr(ns_effective, "exclude_suf", None))
 
@@ -155,9 +194,7 @@ class ExecutionEngine:
                     suffixes=suffixes,
                     exclude_suf=exclude_suf,
                 )
-                remote_files = self._discovery.fetch_urls(
-                    urls=ns_effective.urls, workspace=workspace
-                )
+                remote_files = self._discovery.fetch_urls(urls=ns_effective.urls, workspace=workspace)
                 scraped_files = self._discovery.scrape_urls(
                     seeds=ns_effective.url_scrape,
                     workspace=workspace,
@@ -174,6 +211,8 @@ class ExecutionEngine:
                 maybe_scope.__exit__(None, None, None)
 
         ctx_name = node.name
+
+        # Env handling (same semantics)
         global_env_map = self._parse_env_items(getattr(ns_effective, "global_env", None))
         local_env_map = self._parse_env_items(getattr(ns_effective, "env_vars", None))
         inherited_for_children = {**(inherited_vars or {}), **global_env_map}
@@ -186,6 +225,7 @@ class ExecutionEngine:
         if gh_dump is not None:
             gh_dump.append(dump_raw)
 
+        # Recurse into children
         for child in node.children:
             child_vars, _ = self.execute_node(
                 child,
@@ -207,13 +247,11 @@ class ExecutionEngine:
         chosen_tpl = getattr(ns_effective, "template", None) or parent_child_tpl
         if chosen_tpl:
             tpl_path = self._resolver.resolve(workspace, chosen_tpl)
-            tpl_path = _guard_ws(tpl_path)
+            tpl_path = _guard(tpl_path)
             if not tpl_path.exists():
                 self._fatal(f"template {tpl_path} not found")
                 raise SystemExit(1)
-            rendered = self._renderer.render_template(
-                tpl_path, vars_local, "".join(gh_dump or [])
-            )
+            rendered = self._renderer.render_template(tpl_path, vars_local, "".join(gh_dump or []))
 
         if ctx_name:
             vars_local[f"_t_{ctx_name}"] = rendered
@@ -224,7 +262,7 @@ class ExecutionEngine:
         out_val = getattr(ns_effective, "output", None)
         if out_val not in (None, "") and str(out_val).lower() != "none":
             out_path = self._resolver.resolve(workspace, out_val)
-            out_path = _guard_ws(out_path)
+            out_path = _guard(out_path)
 
         if getattr(ns_effective, "ai", False):
             if out_path is None:
@@ -235,18 +273,19 @@ class ExecutionEngine:
             ai_sys = getattr(ns_effective, "ai_system_prompt", None)
             if ai_sys and str(ai_sys).lower() != "none":
                 spath = self._resolver.resolve(workspace, ai_sys)
-                spath = _guard_ws(spath)
+                spath = _guard(spath)
                 if not spath.exists():
                     self._fatal(f"system prompt {spath} not found")
                     raise SystemExit(1)
                 sys_prompt = self._renderer.interpolate(
-                    spath.read_text(encoding="utf-8"), vars_local
+                    spath.read_text(encoding="utf-8"),
+                    vars_local,
                 )
             seeds_path = None
             ai_seeds = getattr(ns_effective, "ai_seeds", None)
             if ai_seeds and str(ai_seeds).lower() != "none":
                 seeds_path = self._resolver.resolve(workspace, ai_seeds)
-                seeds_path = _guard_ws(seeds_path)
+                seeds_path = _guard(seeds_path)
             self._ai.run(
                 prompt=rendered,
                 out_path=out_path,
@@ -284,43 +323,5 @@ class ExecutionEngine:
         if level == 0 and gh_dump is not None:
             vars_local["ghconcat_dump"] = "".join(gh_dump)
 
-        vars_local["__GH_NEXT_CHILD_TEMPLATE__"] = getattr(
-            ns_effective, "child_template", None
-        ) or ""
+        vars_local["__GH_NEXT_CHILD_TEMPLATE__"] = getattr(ns_effective, "child_template", None) or ""
         return (vars_local, final_out)
-
-    # ----------------------------
-    # Internal helpers
-    # ----------------------------
-
-    def _resolve_root_and_workspace(
-        self,
-        ns_parent: Optional[argparse.Namespace],
-        ns_self: argparse.Namespace,
-        parent_root: Optional[Path],
-        parent_workspace: Optional[Path],
-    ) -> tuple[Path, Path]:
-        """Resolve `root` and `workspace` exactly as the original logic."""
-        # Root resolution
-        if ns_parent is None:
-            base_for_root = Path.cwd()
-            root = self._resolver.resolve(base_for_root, ns_self.workdir or ".")
-        elif ns_self.workdir not in (None, ""):
-            base_for_root = parent_root or Path.cwd()
-            root = self._resolver.resolve(base_for_root, ns_self.workdir)
-        else:
-            root = parent_root or Path.cwd()
-
-        # Workspace resolution
-        if ns_parent is None:
-            if ns_self.workspace not in (None, ""):
-                workspace = self._resolver.resolve(root, ns_self.workspace)
-            else:
-                workspace = root
-        elif ns_self.workspace not in (None, ""):
-            base_ws = parent_workspace or root
-            workspace = self._resolver.resolve(base_ws, ns_self.workspace)
-        else:
-            workspace = parent_workspace or root
-
-        return root, workspace
