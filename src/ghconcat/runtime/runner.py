@@ -5,8 +5,6 @@ Thin EngineRunner that satisfies ExecutionEngineProtocol.
 This runner maps a ContextConfig into the canonical GhConcat flow.
 Uses class-based helpers (TextReplacer, EnvExpander, NamespaceMerger).
 """
-
-import logging
 import re
 from pathlib import Path
 from typing import List, Tuple
@@ -24,11 +22,12 @@ from ghconcat.processing.line_ops import LineProcessingService
 from ghconcat.parsing.parser import _build_parser
 from ghconcat.processing.string_interpolator import StringInterpolator
 from ghconcat.runtime.helpers import TextReplacer, EnvExpander, NamespaceMerger
+from ghconcat.logging.helpers import get_logger
 
 
 class EngineRunner(ExecutionEngineProtocol):
-    def __init__(self, *, logger: logging.Logger | None = None) -> None:
-        self._log = logger or logging.getLogger('ghconcat.runner')
+    def __init__(self, *, logger=None) -> None:
+        self._log = logger or get_logger('runner')
 
     def _to_argv(self, ctx: ContextConfig) -> List[str]:
         args: List[str] = []
@@ -59,7 +58,6 @@ class EngineRunner(ExecutionEngineProtocol):
         _clones_cache: dict[tuple[str, str | None], Path] = {}
         _workspaces_seen: set[Path] = set()
         _line_ops = LineProcessingService(comment_rules=COMMENT_RULES, line1_re=_line1_re, logger=self._log)
-
         replacer = TextReplacer(logger=self._log)
         envx = EnvExpander(logger=self._log)
         merger = NamespaceMerger(logger=self._log)

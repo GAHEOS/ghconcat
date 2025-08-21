@@ -59,28 +59,30 @@ from ghconcat.runtime.runner import EngineRunner
 from ghconcat.utils.net import ssl_context_for as _ssl_ctx_for
 from ghconcat.parsing.parser import _build_parser
 from ghconcat.runtime.sdk import _call_openai, _perform_upgrade
+from ghconcat.logging.helpers import get_logger
+from ghconcat.ai.model_registry import ModelSpec, get_registry, register_model
 
 __version__ = '0.9.1'
 
 
 def renderer_factory(
-    *, walker, template_engine: Optional[TemplateEngineProtocol] = None,
-    header_delim: str = HEADER_DELIM, logger: Optional[logging.Logger] = None,
+        *,
+        walker,
+        template_engine: Optional[TemplateEngineProtocol] = None,
+        header_delim: str = HEADER_DELIM,
+        logger: Optional[logging.Logger] = None,
 ) -> Renderer:
-    """
-    Build a Renderer with sensible defaults.
-    """
+    """Factory helper to build a Renderer with sane defaults."""
     engine = template_engine or SingleBraceTemplateEngine(logger=logger)
     factory = DefaultRendererFactory()
-    lg = logger or logging.getLogger('ghconcat')
+    lg = logger or get_logger('render')
     return factory(walker=walker, template_engine=engine, header_delim=header_delim, logger=lg)
 
 
 def path_resolver_factory(*, workspace: Optional[str] = None) -> WorkspaceAwarePathResolver:
-    """
-    Build a WorkspaceAwarePathResolver, optionally binding a workspace.
-    """
+    """Factory helper to build a PathResolver aware of a workspace."""
     from pathlib import Path as _P
+
     ws = _P(workspace) if workspace else None
     factory = DefaultPathResolverFactory(builder=lambda: WorkspaceAwarePathResolver(workspace=ws))
     return factory()
@@ -140,4 +142,7 @@ __all__ = [
     '_call_openai',
     '_perform_upgrade',
     '_build_parser',
+    'ModelSpec',
+    'get_registry',
+    'register_model',
 ]

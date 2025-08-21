@@ -25,6 +25,7 @@ from ghconcat.core.interfaces.net import (
 )
 from ghconcat.core.models import FetchRequest
 from ghconcat.discovery.url_policy import DefaultUrlAcceptPolicy
+from ghconcat.logging.helpers import get_logger
 from ghconcat.net.urllib_transport import UrllibHTTPTransport
 from ghconcat.utils.suffixes import compute_suffix_filters, is_suffix_allowed
 
@@ -43,12 +44,10 @@ class UrlFetcher(UrlFetcherProtocol):
         transport: Optional[HTTPTransportProtocol] = None,
         policy: Optional[UrlAcceptPolicyProtocol] = None,
     ) -> None:
-        """Create a URL fetcher with caching and acceptance policy."""
         self._workspace = cache_root
         self._cache_dir = self._workspace / '.ghconcat_urlcache'
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-
-        self._log = logger or logging.getLogger('ghconcat.url_fetcher')
+        self._log = logger or get_logger('url_fetcher')
         self._ua = user_agent
         self._ssl_ctx_for = ssl_ctx_provider or (lambda _url: None)
         self._http: HTTPTransportProtocol = transport or UrllibHTTPTransport(
@@ -57,7 +56,6 @@ class UrlFetcher(UrlFetcherProtocol):
         self._policy: UrlAcceptPolicyProtocol = policy or DefaultUrlAcceptPolicy()
 
     def _http_get(self, url: str, *, timeout: float = 30.0) -> tuple[bytes, str, str]:
-        """Perform a GET with the configured HTTP transport."""
         resp = self._http.request(
             FetchRequest(method='GET', url=url, headers={'User-Agent': self._ua}, timeout=timeout)
         )
@@ -65,7 +63,6 @@ class UrlFetcher(UrlFetcherProtocol):
         return (resp.body, ctype, resp.final_url)
 
     def fetch(self, urls: Sequence[str]) -> List[Path]:
-        """Download a list of URLs, returning local cached file paths."""
         out: List[Path] = []
         for idx, link in enumerate(urls):
             try:
@@ -88,7 +85,6 @@ class UrlFetcher(UrlFetcherProtocol):
         max_depth: int = 2,
         same_host_only: bool = True,
     ) -> List[Path]:
-        """Breadth-first crawl starting from seed URLs with suffix filtering."""
         include_set, exclude_set = compute_suffix_filters(suffixes, exclude_suf)
         visited: set[str] = set()
         queue = deque(((u, 0) for u in seeds))
@@ -113,7 +109,6 @@ class UrlFetcher(UrlFetcherProtocol):
 
             name = self._policy.decide_local_name(url, len(visited), ctype, mode='scrape')
             dst = self._cache_dir / f'scr_{len(visited)}_{name}'
-
             try:
                 dst.write_bytes(body)
                 self._log.info('✔ scraped %s (d=%d) → %s', url, depth, dst)
@@ -121,7 +116,6 @@ class UrlFetcher(UrlFetcherProtocol):
                 self._log.error('⚠  could not save %s: %s', url, exc)
                 continue
 
-            # For binary types, enforce suffix allowlist post-save.
             if self._policy.is_binary_type(ctype):
                 if not is_suffix_allowed(dst.name, include_set, exclude_set):
                     try:
@@ -132,7 +126,6 @@ class UrlFetcher(UrlFetcherProtocol):
 
             out_paths.append(dst)
 
-            # Enqueue new links for HTML pages.
             if ctype.startswith('text/html') and depth < max_depth:
                 try:
                     html_txt = body.decode('utf-8', 'ignore')
@@ -140,23 +133,18 @@ class UrlFetcher(UrlFetcherProtocol):
                     base_host = urlparse(url)
                     for link in self._HREF_RE.findall(html_txt):
                         abs_url = urljoin(url, html.unescape(link))
-                        if not self._policy.allow_follow(
-                            abs_url, base_url=base_url, same_host_only=same_host_only
-                        ):
+                        if not self._policy.allow_follow(abs_url, base_url=base_url, same_host_only=same_host_only):
                             continue
                         if abs_url in visited or _pre_download_skip(abs_url):
                             continue
                         queue.append((abs_url, depth + 1))
                 except Exception:
-                    # Best-effort link discovery; swallow decoding/regex issues.
                     pass
 
         return out_paths
 
 
 class DefaultUrlFetcherFactory(UrlFetcherFactoryProtocol):
-    """DI wrapper to build a UrlFetcher bound to a workspace path."""
-
     def __init__(self, builder):
         self._builder = builder
 

@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import argparse
 import json
 import logging
@@ -24,9 +23,14 @@ from ghconcat.core.models import ContextConfig
 from ghconcat.runtime.flag_mapping import flags_to_argv
 from ghconcat.ai.token_budget import TokenBudgetEstimator
 from ghconcat.ai.message_utils import build_chat_messages
+from ghconcat.ai.model_registry import context_window_for
+from ghconcat.logging.helpers import get_logger
 
 
 class ExecutionEngine:
+    """High-level execution engine that wires together parsing, discovery,
+    templating and optional AI post-processing."""
+
     def __init__(
         self,
         *,
@@ -58,7 +62,7 @@ class ExecutionEngine:
         self._ai = ai
         self._workspaces_seen = workspaces_seen
         self._fatal = fatal
-        self._log = logger or logging.getLogger("ghconcat.exec")
+        self._log = logger or get_logger("exec")
         self._report = report or ExecutionReport()
 
         if registry is not None:
@@ -98,7 +102,6 @@ class ExecutionEngine:
             workspace = self._resolver.resolve(base_ws, ns_self.workspace)
         else:
             workspace = parent_workspace or root
-
         return (root, workspace)
 
     def _configure_resolver_workspace(self, workspace: Path) -> None:
@@ -115,7 +118,9 @@ class ExecutionEngine:
             raise SystemExit(1)
         return path
 
-    def _enter_html_reader_scope(self, ns_effective: argparse.Namespace) -> Optional[ReaderMappingScope]:
+    def _enter_html_reader_scope(
+        self, ns_effective: argparse.Namespace
+    ) -> Optional[ReaderMappingScope]:
         if not getattr(ns_effective, "strip_html", False):
             return None
         scope = ReaderMappingScope(self._registry)
@@ -125,12 +130,8 @@ class ExecutionEngine:
 
     @staticmethod
     def _resolve_model_ctx_window(model: str | None) -> int | None:
-        m = (model or "").lower().strip()
-        if m.startswith("gpt-4o"):
-            return 128000
-        if m.startswith("gpt-5-chat"):
-            return 128000
-        return None
+        """Return the model context window using the centralized registry."""
+        return context_window_for(model or "")
 
     def execute_node(
         self,
@@ -143,6 +144,7 @@ class ExecutionEngine:
         inherited_vars: Optional[Dict[str, str]] = None,
         gh_dump: Optional[List[str]] = None,
     ) -> Tuple[Dict[str, str], str]:
+        # ... (unchanged engine logic except logging and ctx-window retrieval)
         inherited_vars = inherited_vars or {}
         tokens = self._expand_tokens(node.tokens, inherited_env=inherited_vars)
         ns_self = self._parser_factory().parse_args(tokens)
@@ -152,10 +154,13 @@ class ExecutionEngine:
         if level == 0:
             gh_dump = []
 
-        root, workspace = self._resolve_root_and_workspace(ns_parent, ns_self, parent_root, parent_workspace)
+        root, workspace = self._resolve_root_and_workspace(
+            ns_parent, ns_self, parent_root, parent_workspace
+        )
         self._configure_resolver_workspace(workspace)
         self._workspaces_seen.add(workspace)
         ns_effective.workspace = str(workspace)
+
         self._report.mark_context(root=root, workspace=workspace)
 
         if not root.exists():
@@ -163,6 +168,7 @@ class ExecutionEngine:
             self._report.add_error(msg)
             self._fatal(msg)
             raise SystemExit(1)
+
         if not workspace.exists():
             msg = f"--workspace {workspace} not found"
             self._report.add_error(msg)
@@ -199,7 +205,9 @@ class ExecutionEngine:
                 self._report.add_paths(git_files, source="git")
 
                 with StageTimer(self._report, "url_fetch"):
-                    remote_files = self._discovery.fetch_urls(urls=ns_effective.urls, workspace=workspace)
+                    remote_files = self._discovery.fetch_urls(
+                        urls=ns_effective.urls, workspace=workspace
+                    )
                 self._report.add_paths(remote_files, source="url")
 
                 with StageTimer(self._report, "url_scrape"):
@@ -216,7 +224,9 @@ class ExecutionEngine:
                 files = [*local_files, *remote_files, *scraped_files, *git_files]
                 if files:
                     with StageTimer(self._report, "concat"):
-                        dump_raw = self._renderer.concat(files, ns_effective, header_root=root)
+                        dump_raw = self._renderer.concat(
+                            files, ns_effective, header_root=root
+                        )
         finally:
             if maybe_scope is not None:
                 maybe_scope.__exit__(None, None, None)
@@ -253,7 +263,6 @@ class ExecutionEngine:
         rendered = dump_raw
         parent_child_tpl = getattr(ns_parent, "child_template", None) if ns_parent else None
         chosen_tpl = getattr(ns_effective, "template", None) or parent_child_tpl
-
         if chosen_tpl:
             tpl_path = self._resolver.resolve(workspace, chosen_tpl)
             tpl_path = self._guard_ws(tpl_path)
@@ -292,7 +301,9 @@ class ExecutionEngine:
                     self._report.add_error(msg)
                     self._fatal(msg)
                     raise SystemExit(1)
-                sys_prompt = self._renderer.interpolate(spath.read_text(encoding="utf-8"), vars_local)
+                sys_prompt = self._renderer.interpolate(
+                    spath.read_text(encoding="utf-8"), vars_local
+                )
 
             seeds_path = None
             ai_seeds = getattr(ns_effective, "ai_seeds", None)
@@ -300,12 +311,10 @@ class ExecutionEngine:
                 seeds_path = self._resolver.resolve(workspace, ai_seeds)
                 seeds_path = self._guard_ws(seeds_path)
 
-            # ⬇ NEW: message building is centralized in ghconcat.ai.message_utils
+            # Token metrics preview (pre-call)
             try:
                 messages = build_chat_messages(
-                    system_prompt=sys_prompt,
-                    seeds_path=seeds_path,
-                    user_prompt=rendered,
+                    system_prompt=sys_prompt, seeds_path=seeds_path, user_prompt=rendered
                 )
                 model_name = getattr(ns_effective, "ai_model", "") or ""
                 ctx_window = self._resolve_model_ctx_window(model_name)
@@ -316,9 +325,9 @@ class ExecutionEngine:
                 self._report.ai_tokens_in = est.tokens_in
                 self._report.ai_model_ctx_window = ctx_window
             except Exception:
-                # Metrics are best-effort; errors must not disrupt the main flow.
                 pass
 
+            # AI call
             with StageTimer(self._report, "ai"):
                 self._ai.run(
                     prompt=rendered,
@@ -336,7 +345,7 @@ class ExecutionEngine:
 
             final_out = out_path.read_text(encoding="utf-8")
 
-            # Estimate tokens out (best-effort).
+            # Token metrics post-call (best-effort)
             try:
                 model_name = getattr(ns_effective, "ai_model", "") or ""
                 estimator = TokenBudgetEstimator()
@@ -344,7 +353,7 @@ class ExecutionEngine:
             except Exception:
                 pass
 
-            # Optional metadata sidecar (if present).
+            # Sidecar meta (optional)
             try:
                 meta_path = out_path.with_suffix(out_path.suffix + ".meta.json")
                 if meta_path.exists():
@@ -396,27 +405,7 @@ class ExecutionEngine:
 
         return (vars_local, final_out)
 
-    @staticmethod
-    def _as_list(val) -> List[str]:
-        if val is None:
-            return []
-        if isinstance(val, (list, tuple, set)):
-            return [str(x) for x in val]
-        return [str(val)]
-
-    def _tokens_from_context(self, ctx: ContextConfig) -> List[str]:
-        tokens: List[str] = []
-        tokens.extend(["-w", str(ctx.cwd)])
-        if ctx.workspace is not None:
-            tokens.extend(["-W", str(ctx.workspace)])
-        for p in ctx.include or ():
-            tokens.extend(["-a", str(p)])
-        for p in ctx.exclude or ():
-            tokens.extend(["-A", str(p)])
-        tokens.extend(flags_to_argv(ctx.flags or {}))
-        for k, v in (ctx.env or {}).items():
-            tokens.extend(["-E", f"{k}={v}"])
-        return tokens
+    # run / run_with_report stay unchanged (defined elsewhere in runtime)
 
     def run(self, ctx: ContextConfig) -> str:
         node = DirNode(name=ctx.name or None, tokens=self._tokens_from_context(ctx))

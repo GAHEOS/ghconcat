@@ -7,6 +7,7 @@ from typing import Any, List, Optional, Set, Tuple
 
 from ghconcat.core.interfaces import WalkerProtocol
 from ghconcat.processing.cleaner_registry import LanguageCleanerRegistry
+from ghconcat.logging.helpers import get_logger
 from ghconcat.utils.suffixes import compute_suffix_filters, is_suffix_allowed
 from ghconcat.utils.paths import is_hidden_path, is_within_dir
 
@@ -30,7 +31,7 @@ class WalkerAppender(WalkerProtocol):
         self._clean = clean_lines
         self._HEADER_DELIM = header_delim
         self._SEEN_FILES = seen_files
-        self._log = logger or logging.getLogger('ghconcat.walker')
+        self._log = logger or get_logger('io.walker')
         self._cleaners = cleaner_registry or LanguageCleanerRegistry.default()
 
     def gather_files(self, add_path: List[Path], exclude_dirs: List[Path], suffixes: List[str], exclude_suf: List[str]) -> List[Path]:
@@ -67,7 +68,6 @@ class WalkerAppender(WalkerProtocol):
     def _apply_cleaning_pipeline(self, *, raw_lines: List[str], ns: argparse.Namespace, ext: str, file_path: Path) -> List[str]:
         lines: List[str] = list(raw_lines)
         rm_enabled: bool = self.should_remove_comments(ns)
-
         if rm_enabled:
             cleaner = self._cleaners.for_suffix(ext)
             if cleaner is not None:
@@ -75,7 +75,6 @@ class WalkerAppender(WalkerProtocol):
                 stripped = cleaner.strip(src, filename=str(file_path))
                 lines = stripped.splitlines(True)
             else:
-                # Fallback to rule-based cleaning when no language cleaner is registered.
                 lines = self._clean(
                     lines,
                     ext,
@@ -85,7 +84,6 @@ class WalkerAppender(WalkerProtocol):
                     rm_exp=False,
                     keep_blank=True,
                 )
-
         if getattr(ns, 'rm_import', False) or getattr(ns, 'rm_export', False):
             lines = self._clean(
                 lines,
@@ -96,7 +94,6 @@ class WalkerAppender(WalkerProtocol):
                 rm_exp=getattr(ns, 'rm_export', False),
                 keep_blank=True,
             )
-
         lines = self._clean(
             lines,
             ext,
@@ -118,7 +115,6 @@ class WalkerAppender(WalkerProtocol):
         for idx, fp in enumerate(files):
             ext = fp.suffix.lower()
             raw_lines = self._read_file_as_lines(fp)
-
             if ns.list_only:
                 rel = str(fp) if ns.absolute_path else os.path.relpath(fp, header_root)
                 parts.append(rel + '\n')
@@ -139,6 +135,7 @@ class WalkerAppender(WalkerProtocol):
 
             if wrapped is not None:
                 wrapped.append((hdr_path, body.rstrip()))
+
             if ns.keep_blank and (idx < len(files) - 1 or (idx == len(files) - 1 and ns.total_lines is None and (ns.first_line is None))):
                 parts.append('\n')
 

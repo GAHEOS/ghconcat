@@ -13,7 +13,6 @@ Public classes:
 - EnvExpander: $VAR expansion, --env / --global-env parsing, "none" stripping.
 - NamespaceMerger: argparse.Namespace merge logic and post-parse normalization.
 """
-
 import argparse
 import logging
 from copy import deepcopy
@@ -30,71 +29,65 @@ from ghconcat.parsing.attr_sets import (
 )
 from ghconcat.processing.envctx import EnvContext
 from ghconcat.processing.text_ops import TextTransformer
+from ghconcat.logging.helpers import get_logger
 
-
-logger = logging.getLogger("ghconcat.helpers")
+logger = get_logger('helpers')
 
 
 class TextReplacer:
-    """Apply regex replacement rules with preserve regions."""
-
     def __init__(self, *, logger: logging.Logger | None = None) -> None:
-        self._log = logger or logging.getLogger("ghconcat.helpers.replacer")
-        self._xf = TextTransformer(logger=self._log, regex_delim="/")
+        self._log = logger or get_logger('helpers.replacer')
+        self._xf = TextTransformer(logger=self._log, regex_delim='/')
 
     def apply(self, text: str, replace_specs: Sequence[str] | None, preserve_specs: Sequence[str] | None) -> str:
-        """Apply replacements respecting preserve rules."""
+        """Apply regex replacements with optional preserve regions."""
         return self._xf.apply_replacements(text, replace_specs, preserve_specs)
 
 
 class EnvExpander:
-    """Expand $VARS in tokens and parse -e/-E items. Handles 'none' disabling."""
-
-    def __init__(self, *, logger: logging.Logger | None = None, none_token: str = "none") -> None:
-        self._log = logger or logging.getLogger("ghconcat.helpers.env")
+    def __init__(self, *, logger: logging.Logger | None = None, none_token: str = 'none') -> None:
+        self._log = logger or get_logger('helpers.env')
         self._ctx = EnvContext(logger=self._log)
         self._none = none_token
 
     def parse_items(self, items: Optional[List[str]]) -> Dict[str, str]:
-        """Parse a list of VAR=VAL items."""
+        """Parse --env/-E items into a dict."""
         return self._ctx.parse_items(items)
 
     def expand_tokens(self, tokens: List[str], inherited_env: Dict[str, str]) -> List[str]:
-        """Expand environment references inside CLI tokens and strip disabled values."""
+        """Expand $VARS in tokens and strip value==none for value-taking flags."""
         return self._ctx.expand_tokens(tokens, inherited_env, value_flags=_VALUE_FLAGS, none_value=self._none)
 
 
 class NamespaceMerger:
-    """Merge argparse namespaces respecting inheritance rules."""
-
     def __init__(self, *, logger: logging.Logger | None = None) -> None:
-        self._log = logger or logging.getLogger("ghconcat.helpers.merge")
+        self._log = logger or get_logger('helpers.merge')
 
     @staticmethod
     def post_parse(ns: argparse.Namespace) -> None:
-        """Normalize compound flags into effective booleans after parsing."""
+        """Normalize flags after argparse to match legacy behavior."""
         flags = set(ns.blank_flags or [])
-        ns.keep_blank = "keep" in flags or "strip" not in flags
+        ns.keep_blank = 'keep' in flags or 'strip' not in flags
 
         first = set(ns.first_flags or [])
-        if "drop" in first:
+        if 'drop' in first:
             ns.keep_header = False
         else:
-            ns.keep_header = "keep" in first
+            ns.keep_header = 'keep' in first
 
         hdr = set(ns.hdr_flags or [])
-        ns.skip_headers = not ("show" in hdr and "hide" not in hdr)
+        ns.skip_headers = not ('show' in hdr and 'hide' not in hdr)
 
         pathf = set(ns.path_flags or [])
-        ns.absolute_path = "absolute" in pathf and "relative" not in pathf
+        ns.absolute_path = 'absolute' in pathf and 'relative' not in pathf
 
-        if getattr(ns, "unwrap", False):
+        if getattr(ns, 'unwrap', False):
             ns.wrap_lang = None
-        if getattr(ns, "no_list", False):
+        if getattr(ns, 'no_list', False):
             ns.list_only = False
 
     def merge(self, parent: argparse.Namespace, child: argparse.Namespace) -> argparse.Namespace:
-        """Merge parent→child considering list accumulation and overriding rules."""
+        """Merge a child namespace into its parent honoring inheritance rules."""
         merged = deepcopy(vars(parent))
         for key, val in vars(child).items():
             if key in _NON_INHERITED:
@@ -107,9 +100,10 @@ class NamespaceMerger:
             elif key in _INT_ATTRS | _FLT_ATTRS:
                 merged[key] = val if val is not None else merged.get(key)
             elif key in _STR_ATTRS:
-                merged[key] = val if val not in (None, "") else merged.get(key)
+                merged[key] = val if val not in (None, '') else merged.get(key)
             else:
                 merged[key] = val
+
         ns = argparse.Namespace(**merged)
         self.post_parse(ns)
         return ns
