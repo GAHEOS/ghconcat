@@ -1,5 +1,6 @@
 from __future__ import annotations
-"""Command-line wiring for ghconcat.
+"""
+Command-line wiring for ghconcat.
 
 This module wires together parser, helpers and the runtime engine without
 exposing unnecessary global state. The refactor removes unused constants
@@ -10,7 +11,6 @@ the test suite.
 import argparse
 import logging
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, NoReturn, Optional, Sequence, Tuple
@@ -20,26 +20,19 @@ from ghconcat.logging.factory import DefaultLoggerFactory
 from ghconcat.parsing.parser import _build_parser
 from ghconcat.parsing.directives import DirNode, DirectiveParser
 from ghconcat.parsing.tokenizer import DirectiveTokenizer
-from ghconcat.processing.comment_rules import COMMENT_RULES
-from ghconcat.processing.line_ops import LineProcessingService
-from ghconcat.processing.string_interpolator import StringInterpolator
-from ghconcat.runtime.container import EngineBuilder, EngineConfig
+from ghconcat.runtime.container import EngineBuilder, build_default_engine_config
 from ghconcat.runtime.sdk import _call_openai, _perform_upgrade
-from ghconcat.utils.net import ssl_context_for as _ssl_ctx_for
+from ghconcat.plugins.registry import apply_policy_set, get_classifier
 from ghconcat.processing.input_classifier import DefaultInputClassifier
 from ghconcat.core.interfaces.classifier import InputClassifierProtocol
-from ghconcat.runtime.helpers import TextReplacer, EnvExpander, NamespaceMerger
-from ghconcat.plugins.registry import apply_policy_set, get_classifier
 from ghconcat.logging.helpers import get_logger
 
 logger = get_logger("ghconcat")
 
-_LINE1_RE: re.Pattern[str] = re.compile(r"^\s*#\s*line\s*1\d*\s*$")
+# Global caches (same semantics as before)
 _SEEN_FILES: set[Path] = set()
 _WORKSPACES_SEEN: set[Path] = set()
 _GIT_CLONES: Dict[Tuple[str, str | None], Path] = {}
-_LINE_OPS = LineProcessingService(comment_rules=COMMENT_RULES, line1_re=_LINE1_RE, logger=logger)
-_INTERPOLATOR = StringInterpolator()
 
 
 def _configure_logging(enable_json: bool) -> None:
@@ -75,7 +68,8 @@ def _make_classifier(ns: argparse.Namespace) -> InputClassifierProtocol:
             factory = get_classifier(name)
             if factory is None:
                 logger.warning(
-                    "⚠  unknown classifier plugin %r – falling back to DefaultInputClassifier", name
+                    "⚠  unknown classifier plugin %r – falling back to DefaultInputClassifier",
+                    name,
                 )
                 classifier: InputClassifierProtocol = DefaultInputClassifier()
             else:
@@ -95,19 +89,15 @@ def _make_classifier(ns: argparse.Namespace) -> InputClassifierProtocol:
         classifier = DefaultInputClassifier()
 
     preset = (getattr(ns, "classifier_policies", "standard") or "standard").lower()
-    if preset == "standard":
+    if preset != "none":
         try:
-            classifier = apply_policy_set("standard", classifier)
+            classifier = apply_policy_set(preset, classifier)
         except Exception as exc:
             logger.warning(
-                '⚠  failed to apply policy set "standard": %s; falling back to DefaultPolicies', exc
+                "⚠  failed to apply policy set %r: %s; continuing without policies",
+                preset,
+                exc,
             )
-            try:
-                from ghconcat.runtime.policies import DefaultPolicies
-
-                DefaultPolicies.register_standard(classifier)
-            except Exception as exc2:
-                logger.warning("⚠  failed to register default policies: %s", exc2)
     return classifier
 
 
@@ -121,12 +111,21 @@ def _execute_node(
     inherited_vars: Optional[Dict[str, str]] = None,
     gh_dump: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, str], str]:
+    # NOTE: tests may monkeypatch `_call_openai` off the ghconcat module.
     _call_fn = _call_openai if "ghconcat" not in sys.modules else getattr(sys.modules["ghconcat"], "_call_openai")
 
-    replacer = TextReplacer(logger=logger)
-    envx = EnvExpander(logger=logger)
-    merger = NamespaceMerger(logger=logger)
+    # Build engine through the centralized, behavior-identical helper.
+    cfg = build_default_engine_config(
+        logger=logger,
+        header_delim=HEADER_DELIM,
+        seen_files=_SEEN_FILES,
+        clones_cache=_GIT_CLONES,
+        workspaces_seen=_WORKSPACES_SEEN,
+        fatal=lambda msg: _fatal(msg),
+    )
+    builder = EngineBuilder.from_config(cfg)
 
+    # Optional custom URL policy loader resolution (kept intact).
     url_policy_ref = getattr(ns_parent or node, "url_policy_ref", None)
     policy_loader = None
     if isinstance(url_policy_ref, str) and url_policy_ref and (url_policy_ref.lower() != "none"):
@@ -134,38 +133,19 @@ def _execute_node(
             policy_cls = _load_object_from_ref(url_policy_ref)
             policy_loader = policy_cls
         except Exception as exc:
-            logger.warning(
-                "⚠  failed to load URL policy %r: %s, continuing with default policy", url_policy_ref, exc
-            )
-
-    cfg = EngineConfig(
-        logger=logger,
-        header_delim=HEADER_DELIM,
-        seen_files=_SEEN_FILES,
-        clones_cache=_GIT_CLONES,
-        workspaces_seen=_WORKSPACES_SEEN,
-        ssl_ctx_provider=_ssl_ctx_for,
-        parser_factory=_build_parser,
-        post_parse=merger.post_parse,
-        merge_ns=merger.merge,
-        expand_tokens=envx.expand_tokens,
-        parse_env_items=envx.parse_items,
-        interpolate=_INTERPOLATOR.interpolate,
-        apply_replacements=replacer.apply,
-        slice_lines=_LINE_OPS.slice_lines,
-        clean_lines=_LINE_OPS.clean_lines,
-        fatal=lambda msg: _fatal(msg),
-        classifier=None,
-    )
-    builder = EngineBuilder.from_config(cfg)
+            logger.warning("⚠  failed to load URL policy %r: %s, continuing with default policy", url_policy_ref, exc)
     if policy_loader is not None:
         setattr(builder, "_url_policy_loader", policy_loader)
+
     engine = builder.build(call_openai=_call_fn)
 
+    # Classifier preview to keep test-visible behavior
     tokens_preview = node.tokens or []
     ns_preview = _build_parser().parse_args(tokens_preview or [])
-    merger.post_parse(ns_preview)
+    from ghconcat.runtime.helpers import NamespaceMerger  # local import to avoid drift
+    NamespaceMerger.post_parse(ns_preview)
     engine._classifier = _make_classifier(ns_preview)
+
     return engine.execute_node(
         node,
         ns_parent,
@@ -196,6 +176,7 @@ class GhConcat:
 
         units: List[Tuple[Optional[Path], List[str]]] = []
         cli_remainder: List[str] = []
+
         it = iter(argv)
         for tok in it:
             if tok in ("-x", "--directives"):
@@ -218,6 +199,7 @@ class GhConcat:
 
         outputs: List[str] = []
         dparser = DirectiveParser(logger=logger)
+
         for directive_path, extra_cli in units:
             _SEEN_FILES.clear()
             if directive_path:
@@ -244,7 +226,6 @@ class GhConcat:
 
         if "--preserve-cache" not in argv:
             _purge_caches()
-
         return "".join(outputs)
 
 

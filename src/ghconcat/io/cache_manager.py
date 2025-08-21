@@ -5,20 +5,28 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 from ghconcat.core.interfaces.cache import CacheManagerProtocol
-from ghconcat.logging.helpers import get_logger
+from ghconcat.logging.helpers import get_logger, trace_io
 
 
 class CacheManager(CacheManagerProtocol):
     def __init__(self, *, logger: Optional[logging.Logger] = None) -> None:
-        self._log = logger or get_logger('io.cache')
+        self._log = logger or get_logger("io.cache")
 
-    def purge_all(self, workspaces: Iterable[Path], *,
-                  patterns: Sequence[str] = ('.ghconcat_gitcache', '.ghconcat_urlcache')) -> None:
+    def purge_all(
+        self,
+        workspaces: Iterable[Path],
+        *,
+        patterns: Sequence[str] = (".ghconcat_gitcache", ".ghconcat_urlcache"),
+    ) -> None:
         for ws in workspaces:
             self.purge_in(ws, patterns=patterns)
 
-    def purge_in(self, workspace: Path, *,
-                 patterns: Sequence[str] = ('.ghconcat_gitcache', '.ghconcat_urlcache')) -> int:
+    def purge_in(
+        self,
+        workspace: Path,
+        *,
+        patterns: Sequence[str] = (".ghconcat_gitcache", ".ghconcat_urlcache"),
+    ) -> int:
         n = 0
         for pat in patterns:
             tgt = Path(workspace) / pat
@@ -26,7 +34,8 @@ class CacheManager(CacheManagerProtocol):
                 n += 1
                 try:
                     shutil.rmtree(tgt, ignore_errors=True)
-                    self._log.info('🗑  cache removed → %s', tgt)
+                    self._log.info("🗑  cache removed → %s", tgt)
+                    trace_io(self._log, "cache: purged directory", path=str(tgt))
                 except Exception as exc:
-                    self._log.warning('⚠  could not delete %s: %s', tgt, exc)
+                    self._log.warning("⚠  could not delete %s: %s", tgt, exc)
         return n

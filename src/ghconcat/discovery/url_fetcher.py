@@ -9,6 +9,7 @@ This module downloads single URLs (`fetch`) and performs breadth-first crawling
 Refactor notes:
 - Extract acceptance/filenaming rules into UrlAcceptPolicyProtocol.
 - Preserve behavior, logging, caching layout and naming scheme.
+- Add optional IO tracing (GHCONCAT_TRACE_IO=1) for cache writes and decisions.
 """
 import html
 import logging
@@ -25,7 +26,7 @@ from ghconcat.core.interfaces.net import (
 )
 from ghconcat.core.models import FetchRequest
 from ghconcat.discovery.url_policy import DefaultUrlAcceptPolicy
-from ghconcat.logging.helpers import get_logger
+from ghconcat.logging.helpers import get_logger, trace_io
 from ghconcat.net.urllib_transport import UrllibHTTPTransport
 from ghconcat.utils.suffixes import compute_suffix_filters, is_suffix_allowed
 
@@ -39,15 +40,15 @@ class UrlFetcher(UrlFetcherProtocol):
         cache_root: Path,
         *,
         logger: Optional[logging.Logger] = None,
-        user_agent: str = 'ghconcat/2.0 (+https://gaheos.com)',
+        user_agent: str = "ghconcat/2.0 (+https://gaheos.com)",
         ssl_ctx_provider: Optional[Callable[[str], Optional[object]]] = None,
         transport: Optional[HTTPTransportProtocol] = None,
         policy: Optional[UrlAcceptPolicyProtocol] = None,
     ) -> None:
         self._workspace = cache_root
-        self._cache_dir = self._workspace / '.ghconcat_urlcache'
+        self._cache_dir = self._workspace / ".ghconcat_urlcache"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        self._log = logger or get_logger('url_fetcher')
+        self._log = logger or get_logger("url_fetcher")
         self._ua = user_agent
         self._ssl_ctx_for = ssl_ctx_provider or (lambda _url: None)
         self._http: HTTPTransportProtocol = transport or UrllibHTTPTransport(
@@ -57,9 +58,14 @@ class UrlFetcher(UrlFetcherProtocol):
 
     def _http_get(self, url: str, *, timeout: float = 30.0) -> tuple[bytes, str, str]:
         resp = self._http.request(
-            FetchRequest(method='GET', url=url, headers={'User-Agent': self._ua}, timeout=timeout)
+            FetchRequest(
+                method="GET",
+                url=url,
+                headers={"User-Agent": self._ua},
+                timeout=timeout,
+            )
         )
-        ctype = (resp.headers.get('Content-Type', '') or '').split(';', 1)[0].strip()
+        ctype = (resp.headers.get("Content-Type", "") or "").split(";", 1)[0].strip()
         return (resp.body, ctype, resp.final_url)
 
     def fetch(self, urls: Sequence[str]) -> List[Path]:
@@ -67,13 +73,14 @@ class UrlFetcher(UrlFetcherProtocol):
         for idx, link in enumerate(urls):
             try:
                 body, ctype, _final_url = self._http_get(link)
-                name = self._policy.decide_local_name(link, idx, ctype, mode='fetch')
-                dst = self._cache_dir / f'{idx}_{name}'
+                name = self._policy.decide_local_name(link, idx, ctype, mode="fetch")
+                dst = self._cache_dir / f"{idx}_{name}"
                 dst.write_bytes(body)
                 out.append(dst)
-                self._log.info('✔ fetched %s → %s', link, dst)
+                self._log.info("✔ fetched %s → %s", link, dst)
+                trace_io(self._log, "fetch: wrote cache file", url=link, path=str(dst), ctype=ctype)
             except Exception as exc:
-                self._log.error('⚠  could not fetch %s: %s', link, exc)
+                self._log.error("⚠  could not fetch %s: %s", link, exc)
         return out
 
     def scrape(
@@ -91,7 +98,10 @@ class UrlFetcher(UrlFetcherProtocol):
         out_paths: List[Path] = []
 
         def _pre_download_skip(url: str) -> bool:
-            return not self._policy.allowed_by_suffix(url, include=include_set, exclude=exclude_set)
+            allowed = self._policy.allowed_by_suffix(url, include=include_set, exclude=exclude_set)
+            if not allowed:
+                trace_io(self._log, "scrape: pre-skip by suffix", url=url)
+            return not allowed
 
         while queue:
             url, depth = queue.popleft()
@@ -100,35 +110,36 @@ class UrlFetcher(UrlFetcherProtocol):
             visited.add(url)
             if _pre_download_skip(url):
                 continue
-
             try:
                 body, ctype, _final_url = self._http_get(url)
             except Exception as exc:
-                self._log.error('⚠  could not scrape %s: %s', url, exc)
+                self._log.error("⚠  could not scrape %s: %s", url, exc)
                 continue
 
-            name = self._policy.decide_local_name(url, len(visited), ctype, mode='scrape')
-            dst = self._cache_dir / f'scr_{len(visited)}_{name}'
+            name = self._policy.decide_local_name(url, len(visited), ctype, mode="scrape")
+            dst = self._cache_dir / f"scr_{len(visited)}_{name}"
             try:
                 dst.write_bytes(body)
-                self._log.info('✔ scraped %s (d=%d) → %s', url, depth, dst)
+                self._log.info("✔ scraped %s (d=%d) → %s", url, depth, dst)
+                trace_io(self._log, "scrape: wrote cache file", url=url, path=str(dst), depth=depth, ctype=ctype)
             except Exception as exc:
-                self._log.error('⚠  could not save %s: %s', url, exc)
+                self._log.error("⚠  could not save %s: %s", url, exc)
                 continue
 
             if self._policy.is_binary_type(ctype):
                 if not is_suffix_allowed(dst.name, include_set, exclude_set):
                     try:
                         dst.unlink(missing_ok=True)
+                        trace_io(self._log, "scrape: removed binary by suffix policy", path=str(dst))
                     except Exception:
                         pass
                     continue
 
             out_paths.append(dst)
 
-            if ctype.startswith('text/html') and depth < max_depth:
+            if ctype.startswith("text/html") and depth < max_depth:
                 try:
-                    html_txt = body.decode('utf-8', 'ignore')
+                    html_txt = body.decode("utf-8", "ignore")
                     base_url = url
                     base_host = urlparse(url)
                     for link in self._HREF_RE.findall(html_txt):
@@ -137,6 +148,8 @@ class UrlFetcher(UrlFetcherProtocol):
                             continue
                         if abs_url in visited or _pre_download_skip(abs_url):
                             continue
+                        # Optional trace on enqueue
+                        trace_io(self._log, "scrape: enqueue link", parent=url, child=abs_url, depth=depth + 1)
                         queue.append((abs_url, depth + 1))
                 except Exception:
                     pass

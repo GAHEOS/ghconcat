@@ -1,18 +1,17 @@
+# src/ghconcat/runtime/flag_mapping.py
 from __future__ import annotations
 """Mapping layer from high-level ContextConfig.flags to CLI argv tokens.
 
 Back-compat policy:
 - We keep the current mapping intact to avoid breaking callers.
-- Two helper utilities are provided to *audit and prune* unused flags when
-  running end-to-end with `ContextConfig` + `EngineRunner.run_with_report`:
-    * get_supported_flag_specs()  → returns a copy of the current specs
-    * simplify_for_parser(parser) → returns a pruned dict limited to parser dests
-
-This allows advanced integrations to reduce the wiring without touching
-existing tests or public behavior.
+- Two helper utilities are provided to audit and prune:
+    * get_supported_flag_specs()
+    * simplify_for_parser(parser)
+- NEW: `context_to_argv(ctx)` centralizes ContextConfig → argv building
+  so both ExecutionEngine and EngineRunner share the exact logic.
 """
-
 from typing import Any, Iterable, List, Mapping
+from ghconcat.core.models import ContextConfig
 
 _FLAG_SPECS: dict[str, tuple[str, type]] = {
     'url_depth': ('--url-depth', int),
@@ -73,10 +72,7 @@ def _as_iter(val: Any) -> Iterable[Any]:
 
 
 def flags_to_argv(flags: Mapping[str, Any] | None) -> List[str]:
-    """Convert a ContextConfig.flags mapping to CLI argv tokens.
-
-    Backward-compatible; ignores unknown keys silently.
-    """
+    """Convert a mapping of flags to argv tokens preserving current semantics."""
     if not flags:
         return []
     argv: List[str] = []
@@ -98,25 +94,44 @@ def flags_to_argv(flags: Mapping[str, Any] | None) -> List[str]:
     return argv
 
 
-# ---- New: helpers for auditing/simplifying the mapping ---------------------
-
-
 def get_supported_flag_specs() -> dict[str, tuple[str, type]]:
-    """Return a shallow copy of the current flag specs (for auditing)."""
+    """Return a copy of the flag specs for auditing."""
     return dict(_FLAG_SPECS)
 
 
 def simplify_for_parser(parser) -> dict[str, tuple[str, type]]:
-    """Return a pruned mapping limited to the given argparse parser.
-
-    The function reads the parser's known destinations and filters the
-    internal mapping to the subset of flags that are *actually* present.
-    It is safe to use in advanced DI flows without affecting global tests.
-    """
+    """Return a pruned dict limited to the parser .dest names."""
     try:
-        actions = getattr(parser, '_actions', [])  # std argparse API
+        actions = getattr(parser, '_actions', [])
         dests = {getattr(a, 'dest', None) for a in actions}
         dests.discard(None)
     except Exception:
         return get_supported_flag_specs()
     return {k: v for k, v in _FLAG_SPECS.items() if k in dests}
+
+
+def context_to_argv(ctx: ContextConfig) -> List[str]:
+    """Build argv tokens from a ContextConfig (single source of truth).
+
+    The order matches the previous behavior to remain test-stable:
+    -w/-W, then -a/-A, then mapped flags, and finally -E VAR=VAL.
+    """
+    args: List[str] = ['-w', str(ctx.cwd)]
+    if ctx.workspace:
+        args += ['-W', str(ctx.workspace)]
+    for p in ctx.include or ():
+        args += ['-a', str(p)]
+    for p in ctx.exclude or ():
+        args += ['-A', str(p)]
+    args += flags_to_argv(ctx.flags)
+    for k, v in (ctx.env or {}).items():
+        args += ['-E', f'{k}={v}']
+    return args
+
+
+__all__ = [
+    'flags_to_argv',
+    'get_supported_flag_specs',
+    'simplify_for_parser',
+    'context_to_argv',
+]

@@ -1,5 +1,20 @@
 from __future__ import annotations
+"""
+Runtime container: builds the execution engine with pluggable factories.
+
+This module keeps the dependency injection surface minimal and avoids
+cross-module type-only indirections. The design goal is to provide a single
+place to assemble the runtime (resolver, discovery, renderer and AI adapter)
+without exposing unnecessary complexity.
+
+Changes in this refactor:
+- Introduced `build_default_engine_config(...)` to centralize the assembly
+  of `EngineConfig` shared by CLI and EngineRunner, eliminating code duplication
+  while preserving behavior and test compatibility.
+"""
+
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Set, Tuple
@@ -30,16 +45,18 @@ from ghconcat.io.readers import ReaderRegistry, get_global_reader_registry
 from ghconcat.processing.input_classifier import DefaultInputClassifier
 from ghconcat.rendering.execution import ExecutionEngine
 from ghconcat.rendering.template_engine import SingleBraceTemplateEngine
-from ghconcat.rendering.factory_config import (
-    WalkerFactoryConfig,
-    RendererFactoryConfig,
-    PathResolverFactoryConfig,
-)
+
+# Added imports for the default-config helper (centralization)
+from ghconcat.processing.comment_rules import COMMENT_RULES
+from ghconcat.processing.line_ops import LineProcessingService
+from ghconcat.parsing.parser import _build_parser
+from ghconcat.processing.string_interpolator import StringInterpolator
+from ghconcat.runtime.helpers import TextReplacer, EnvExpander, NamespaceMerger
+from ghconcat.utils.net import ssl_context_for as _ssl_ctx_for
 
 
 @dataclass(frozen=True)
 class EngineConfig:
-    """Immutable configuration blob used to seed the EngineBuilder."""
     logger: logging.Logger
     header_delim: str
     seen_files: Set[str]
@@ -56,8 +73,6 @@ class EngineConfig:
     slice_lines: Callable[[list[str], Optional[int], Optional[int], bool], list[str]]
     clean_lines: Callable[..., list[str]]
     fatal: Callable[[str], None]
-
-    # Optional factory overrides (kept for API completeness; unused by tests)
     walker_factory: Optional[WalkerFactoryProtocol] = None
     renderer_factory: Optional[RendererFactoryProtocol] = None
     discovery_factory: Optional[
@@ -69,15 +84,65 @@ class EngineConfig:
     path_resolver_factory: Optional[PathResolverFactoryProtocol] = None
     classifier: Optional[InputClassifierProtocol] = None
 
-    # Optional factory configs (opt-in, end-to-end DI convenience)
-    walker_cfg: Optional[WalkerFactoryConfig] = None
-    renderer_cfg: Optional[RendererFactoryConfig] = None
-    path_resolver_cfg: Optional[PathResolverFactoryConfig] = None
+
+def build_default_engine_config(
+    *,
+    logger: logging.Logger,
+    header_delim: str,
+    seen_files: Set[str],
+    clones_cache: Dict[Tuple[str, Optional[str]], Path],
+    workspaces_seen: Set[Path],
+    fatal: Callable[[str], None],
+) -> EngineConfig:
+    """Build a default EngineConfig instance.
+
+    This helper centralizes the exact, test-compatible setup shared by
+    both CLI and EngineRunner. Using this function removes duplicated code
+    while keeping behavior strictly unchanged.
+
+    Args:
+        logger: Logger instance to be used across components.
+        header_delim: Header delimiter string.
+        seen_files: Mutable set tracking already-bannered files.
+        clones_cache: Mutable mapping for deduplicated git clones.
+        workspaces_seen: Mutable set of workspace paths.
+        fatal: Fatal error handler (must raise SystemExit or exit process).
+
+    Returns:
+        EngineConfig ready to be passed into EngineBuilder.from_config(...).
+    """
+    # Keep the original line-1 regex and comment rules exactly the same
+    _line1_re = re.compile(r"^\s*#\s*line\s*1\d*\s*$")
+    _line_ops = LineProcessingService(
+        comment_rules=COMMENT_RULES, line1_re=_line1_re, logger=logger
+    )
+    replacer = TextReplacer(logger=logger)
+    envx = EnvExpander(logger=logger)
+    merger = NamespaceMerger(logger=logger)
+
+    return EngineConfig(
+        logger=logger,
+        header_delim=header_delim,
+        seen_files=seen_files,
+        clones_cache=clones_cache,
+        workspaces_seen=workspaces_seen,
+        ssl_ctx_provider=_ssl_ctx_for,
+        parser_factory=_build_parser,
+        post_parse=merger.post_parse,
+        merge_ns=merger.merge,
+        expand_tokens=envx.expand_tokens,
+        parse_env_items=envx.parse_items,
+        interpolate=lambda tpl, m: StringInterpolator().interpolate(tpl, m),
+        apply_replacements=replacer.apply,
+        slice_lines=_line_ops.slice_lines,
+        clean_lines=_line_ops.clean_lines,
+        fatal=fatal,
+        classifier=None,
+    )
 
 
 @dataclass
 class EngineBuilder:
-    """Composable builder that wires default factories into an ExecutionEngine."""
     logger: logging.Logger
     header_delim: str
     seen_files: Set[str]
@@ -94,8 +159,6 @@ class EngineBuilder:
     slice_lines: Callable[[list[str], Optional[int], Optional[int], bool], list[str]]
     clean_lines: Callable[..., list[str]]
     fatal: Callable[[str], None]
-
-    # Optional factory overrides / DI hooks
     walker_factory: Optional[WalkerFactoryProtocol] = None
     renderer_factory: Optional[RendererFactoryProtocol] = None
     discovery_factory: Optional[
@@ -107,14 +170,8 @@ class EngineBuilder:
     path_resolver_factory: Optional[PathResolverFactoryProtocol] = None
     classifier: Optional[InputClassifierProtocol] = None
 
-    # Optional factory configs (not used by tests, provided for advanced callers)
-    walker_cfg: Optional[WalkerFactoryConfig] = None
-    renderer_cfg: Optional[RendererFactoryConfig] = None
-    path_resolver_cfg: Optional[PathResolverFactoryConfig] = None
-
     @classmethod
-    def from_config(cls, cfg: EngineConfig) -> 'EngineBuilder':
-        """Build a new EngineBuilder from a single EngineConfig."""
+    def from_config(cls, cfg: EngineConfig) -> "EngineBuilder":
         return cls(
             logger=cfg.logger,
             header_delim=cfg.header_delim,
@@ -137,51 +194,20 @@ class EngineBuilder:
             discovery_factory=cfg.discovery_factory,
             path_resolver_factory=cfg.path_resolver_factory,
             classifier=cfg.classifier,
-            walker_cfg=cfg.walker_cfg,
-            renderer_cfg=cfg.renderer_cfg,
-            path_resolver_cfg=cfg.path_resolver_cfg,
         )
 
-    @classmethod
-    def from_configs(cls, cfg: EngineConfig, *factory_cfgs) -> 'EngineBuilder':
-        """Optional multi-config constructor.
-
-        Accepts EngineConfig and an arbitrary list of factory configs:
-        WalkerFactoryConfig, RendererFactoryConfig, PathResolverFactoryConfig.
-        This is opt-in and **does not** affect existing behavior/tests.
-        """
-        builder = cls.from_config(cfg)
-        for fc in factory_cfgs:
-            if isinstance(fc, WalkerFactoryConfig):
-                builder.walker_cfg = fc
-            elif isinstance(fc, RendererFactoryConfig):
-                builder.renderer_cfg = fc
-            elif isinstance(fc, PathResolverFactoryConfig):
-                builder.path_resolver_cfg = fc
-        return builder
-
     def _clone_registry_for_run(self) -> ReaderRegistry:
-        """Create a suffix-only clone of the global reader registry for a run."""
         g = get_global_reader_registry(self.logger)
         return g.clone_suffix_only()
 
     def build(self, *, call_openai) -> ExecutionEngine:
-        """Materialize an ExecutionEngine with the currently wired factories.
-
-        The method honors an optional attribute `_url_policy_loader` that may
-        be set by the CLI layer to inject a custom UrlAcceptPolicy. This keeps
-        public signatures intact while enabling `--url-policy module:Class`.
-        """
-        # Readers & file-service
         reg = self._clone_registry_for_run()
         frs = FileReadingService(registry=reg, logger=self.logger)
 
-        # Factories (resolver/walker/renderer)
         pr_factory = self.path_resolver_factory or DefaultPathResolverFactory()
         w_factory = self.walker_factory or DefaultWalkerFactory()
         r_factory = self.renderer_factory or DefaultRendererFactory()
 
-        # Concrete resolver + walker
         resolver: PathResolverProtocol = pr_factory()
         walker: WalkerProtocol = w_factory(
             frs,
@@ -193,24 +219,20 @@ class EngineBuilder:
             self.logger,
         )
 
-        # Git manager & URL fetcher factories
         gm_factory = DefaultGitManagerFactory(
             lambda ws: GitRepositoryManager(ws, logger=self.logger, clones_cache=self.clones_cache)
         )
 
-        # Resolve optional custom URL policy set by CLI (if any)
-        policy_loader = getattr(self, '_url_policy_loader', None)
+        policy_loader = getattr(self, "_url_policy_loader", None)
 
         def _policy_instance():
-            """Instantiate a UrlAcceptPolicy, falling back to default on errors."""
             try:
                 if policy_loader is None:
                     return DefaultUrlAcceptPolicy()
-                # If a class/callable is provided, call it; if it's an instance, return it.
                 return policy_loader() if callable(policy_loader) else policy_loader
             except Exception as exc:
                 self.logger.warning(
-                    '⚠  failed to instantiate custom URL policy %r: %s; using default',
+                    "⚠  failed to instantiate custom URL policy %r: %s; using default",
                     policy_loader,
                     exc,
                 )
@@ -218,14 +240,10 @@ class EngineBuilder:
 
         uf_factory = DefaultUrlFetcherFactory(
             lambda ws: UrlFetcher(
-                ws,
-                logger=self.logger,
-                ssl_ctx_provider=self.ssl_ctx_provider,
-                policy=_policy_instance(),
+                ws, logger=self.logger, ssl_ctx_provider=self.ssl_ctx_provider, policy=_policy_instance()
             )
         )
 
-        # Discovery orchestration
         if self.discovery_factory is not None:
             discovery: FileDiscoveryProtocol = self.discovery_factory(
                 walker, gm_factory, uf_factory, resolver, self.logger
@@ -239,12 +257,10 @@ class EngineBuilder:
                 logger=self.logger,
             )
 
-        # Templating/renderer & AI adapter
         tpl_engine = SingleBraceTemplateEngine(logger=self.logger)
         renderer: RendererProtocol = r_factory(walker, tpl_engine, self.header_delim, self.logger)
         ai = DefaultAIProcessor(call_openai=call_openai, logger=self.logger)
 
-        # Compose final engine
         engine = ExecutionEngine(
             parser_factory=self.parser_factory,
             post_parse=self.post_parse,

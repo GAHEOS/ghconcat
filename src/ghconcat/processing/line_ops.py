@@ -1,25 +1,39 @@
+# src/ghconcat/processing/line_ops.py
 import logging
 import re
 from typing import Iterable, List, Mapping, Optional, Pattern, Tuple
-
 from ghconcat.logging.helpers import get_logger
-from ghconcat.processing.comment_rules import COMMENT_RULES
 
 CommentRules = Mapping[str, Tuple[Pattern[str], Pattern[str], Optional[Pattern[str]], Optional[Pattern[str]]]]
 
 
 class LineProcessingService:
-    def __init__(self, *, comment_rules: CommentRules, line1_re: Pattern[str], logger: Optional[logging.Logger] = None) -> None:
+    """Line processing helpers (slicing and regex-based cleaning).
+
+    This class is intentionally minimal; language-aware cleaners live in
+    `LanguageCleanerRegistry` and are invoked upstream when available.
+    """
+
+    def __init__(
+        self,
+        *,
+        comment_rules: CommentRules,
+        line1_re: Pattern[str],
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
         self._rules = comment_rules
         self._line1_re = line1_re
         self._log = logger or get_logger('processing.lineops')
         self._re_blank = re.compile(r'^\s*$')
 
-    @classmethod
-    def create_default(cls, *, line1_re: Pattern[str], logger: Optional[logging.Logger] = None, comment_rules: CommentRules):
-        return cls(comment_rules=comment_rules or COMMENT_RULES, line1_re=line1_re, logger=logger)
-
-    def slice_lines(self, raw: List[str], begin: Optional[int], total: Optional[int], keep_header: bool) -> List[str]:
+    def slice_lines(
+        self,
+        raw: List[str],
+        begin: Optional[int],
+        total: Optional[int],
+        keep_header: bool,
+    ) -> List[str]:
+        """Return a sliced view of the input lines honoring header policy."""
         if not raw:
             return []
         start = max(1, begin or 1)
@@ -42,6 +56,20 @@ class LineProcessingService:
         rm_exp: bool,
         keep_blank: bool,
     ) -> List[str]:
+        """Apply regex-based cleaning according to per-language rules.
+
+        Args:
+            lines: Input lines (with trailing newlines preserved).
+            ext: File suffix in lowercase (e.g. ".py").
+            rm_comments: Enable simple comment removal.
+            no_rm_comments: If True, remove *all* comments instead of the simple rule.
+            rm_imp: Remove import/use/include-like statements when available.
+            rm_exp: Remove export/module.exports-like statements when available.
+            keep_blank: Preserve blank lines.
+
+        Returns:
+            A list of cleaned lines.
+        """
         out: List[str] = []
         rules = self._rules.get(ext.lower())
         simple_rx = rules[0] if rules else None

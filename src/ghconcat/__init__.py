@@ -34,7 +34,6 @@ from ghconcat.io.readers import (
 )
 from ghconcat.io.walker import WalkerAppender
 from ghconcat.ai.ai_client import OpenAIClient
-from ghconcat.processing.comment_rules import COMMENT_RULES
 from ghconcat.processing.envctx import EnvContext
 from ghconcat.processing.line_ops import LineProcessingService
 from ghconcat.processing.string_interpolator import StringInterpolator

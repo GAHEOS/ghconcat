@@ -1,4 +1,2 @@
-"""
-ghconcat.net – Network adapters and transports.
-Provides the default HTTP transport implementation used by UrlFetcher.
-"""
+"""Public API surface for ghconcat.net."""
+__all__ = ["urllib_transport"]
