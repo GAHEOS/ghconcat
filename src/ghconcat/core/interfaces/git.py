@@ -1,3 +1,4 @@
+from __future__ import annotations
 from pathlib import Path
 from typing import List, Protocol, runtime_checkable
 
@@ -7,11 +8,11 @@ class GitRepositoryManagerProtocol(Protocol):
     """Contract for a Git manager that materializes files from -g/-G specs."""
 
     def collect_files(
-        self,
-        git_specs: List[str],
-        git_exclude: List[str],
-        suffixes: List[str],
-        exclude_suf: List[str],
+            self,
+            git_specs: List[str],
+            git_exclude: List[str],
+            suffixes: List[str],
+            exclude_suf: List[str],
     ) -> List[Path]: ...
 
 

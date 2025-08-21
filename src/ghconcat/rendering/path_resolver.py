@@ -1,25 +1,58 @@
+from __future__ import annotations
+"""
+Path resolver utilities.
+
+This module consolidates the default path resolver to the workspace-aware
+implementation while preserving public API compatibility:
+
+- `DefaultPathResolver` is now an alias of `WorkspaceAwarePathResolver`.
+- Base `PathResolver` also tracks a workspace root so that all concrete
+  resolvers behave consistently.
+- `PathResolverProtocol` is re-exported here to preserve the import path
+  used in ghconcat.__init__.
+
+Design goals:
+- Keep the API stable for external imports.
+- Enforce workspace-aware safety where requested by the engine.
+"""
+
 from pathlib import Path
 from typing import Optional
 
-from ghconcat.core.interfaces.fs import PathResolverProtocol
+# Re-export the protocol to preserve import compatibility:
+from ghconcat.core.interfaces.fs import PathResolverProtocol as _PathResolverProtocol
+PathResolverProtocol = _PathResolverProtocol
 
 
 class PathResolver(PathResolverProtocol):
-    """Resolve and validate filesystem paths with optional workspace awareness."""
+    """Basic path resolver with optional workspace awareness.
+
+    This base implementation keeps a workspace root reference and offers
+    helpers used by the engine to guard paths.
+    """
+
+    def __init__(self, *, workspace: Optional[Path] = None) -> None:
+        self._workspace: Optional[Path] = workspace
 
     def resolve(self, base: Path, maybe: Optional[str]) -> Path:
-        """Resolve `maybe` against `base` (supports absolute and `~`)."""
+        """Resolve `maybe` against `base`, expanding '~' if present."""
         if maybe is None:
             return base
         pth = Path(maybe).expanduser()
         return pth if pth.is_absolute() else (base / pth).resolve()
 
-    def workspace_root(self) -> Path | None:
-        """Return the active workspace root, if any."""
-        return None
+    # Workspace handling -----------------------------------------------------
+
+    def workspace_root(self) -> Optional[Path]:
+        """Return the current workspace root (if any)."""
+        return self._workspace
+
+    def set_workspace_root(self, root: Optional[Path]) -> None:
+        """Set/clear the workspace root for subsequent path guards."""
+        self._workspace = root
 
     def is_within_workspace(self, path: Path) -> bool:
-        """Check whether `path` is inside the current workspace root (if set)."""
+        """Return True if `path` is inside the current workspace (or no workspace set)."""
         root = self.workspace_root()
         if root is None:
             return True
@@ -30,24 +63,16 @@ class PathResolver(PathResolverProtocol):
             return False
 
 
-class DefaultPathResolver(PathResolver):
-    """Default resolver with no workspace restrictions."""
-    pass
-
-
 class WorkspaceAwarePathResolver(PathResolver):
-    """Resolver that can enforce a workspace root boundary."""
+    """Concrete resolver that always considers a workspace (when provided).
+
+    This class exists for semantic clarity. It inherits the workspace logic
+    from `PathResolver` and adds no extra behavior.
+    """
 
     def __init__(self, *, workspace: Optional[Path] = None) -> None:
-        self._workspace: Optional[Path] = workspace
+        super().__init__(workspace=workspace)
 
-    def set_workspace_root(self, root: Optional[Path]) -> None:
-        """Dynamically update the workspace root."""
-        self._workspace = root
 
-    def workspace_root(self) -> Path | None:
-        return self._workspace
-
-    def is_within_workspace(self, path: Path) -> bool:
-        """Delegate to base implementation to avoid duplication."""
-        return super().is_within_workspace(path)
+# Public default – consolidated to the workspace-aware implementation.
+DefaultPathResolver = WorkspaceAwarePathResolver

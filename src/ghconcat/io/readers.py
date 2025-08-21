@@ -1,3 +1,14 @@
+from __future__ import annotations
+
+"""
+Unified reader registry and built-in file readers.
+
+This module exposes:
+  * `ReaderRegistry`: A registry that maps suffixes and ad-hoc rules to readers.
+  * `DefaultTextReader`, `PdfFileReader`, `ExcelFileReader`: Built-in readers.
+  * `get_global_reader_registry`: Process-wide registry (suffix-only snapshot).
+"""
+
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -10,16 +21,16 @@ from ghconcat.core.models import ReaderHint
 
 
 class FileReader(ABC):
-    """Abstract file reader that returns the content as a list of lines."""
+    """Abstract interface for line-oriented file readers."""
 
     @abstractmethod
     def read_lines(self, path: Path) -> List[str]:
-        """Read and return lines for the given file path."""
+        """Read a file and return a list of lines (with newline characters)."""
         raise NotImplementedError
 
 
 class DefaultTextReader(FileReader):
-    """UTF-8 text reader with binary/Unicode error protection."""
+    """UTF-8 text reader with tolerant error handling."""
 
     def __init__(self, *, logger: Optional[logging.Logger] = None) -> None:
         self._log = logger or logging.getLogger("ghconcat.readers")
@@ -37,7 +48,7 @@ class DefaultTextReader(FileReader):
 
 
 class PdfFileReader(FileReader):
-    """PDF reader that falls back to OCR if configured and needed."""
+    """PDF reader backed by `PdfTextExtractor` (with optional OCR)."""
 
     def __init__(
         self,
@@ -60,9 +71,14 @@ class PdfFileReader(FileReader):
 
 
 class ExcelFileReader(FileReader):
-    """Excel reader that exports sheets to TSV before returning lines."""
+    """Excel reader that exports worksheets as TSV blocks."""
 
-    def __init__(self, *, exporter: Optional[ExcelTsvExporter] = None, logger: Optional[logging.Logger] = None) -> None:
+    def __init__(
+        self,
+        *,
+        exporter: Optional[ExcelTsvExporter] = None,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
         self._log = logger or logging.getLogger("ghconcat.readers.excel")
         self._exporter = exporter or ExcelTsvExporter(logger=self._log)
 
@@ -75,6 +91,7 @@ class ExcelFileReader(FileReader):
 
 @dataclass(frozen=True)
 class _Rule:
+    """Internal rule slot used by `ReaderRegistry`."""
     reader: FileReader
     priority: int = 0
     suffixes: Optional[tuple[str, ...]] = None
@@ -83,40 +100,55 @@ class _Rule:
 
 
 class ReaderRegistry:
-    """Registry mapping file suffixes / predicates to `FileReader` instances.
+    """Suffix and rule-based multiplexer of file readers.
 
     The registry supports:
-      - Static suffix mapping (e.g. `.txt` → DefaultTextReader)
-      - Rule-based dispatch with priority, suffix/mime filters and predicates
-      - Push/pop stack to use temporary overrides within a context
+      * Direct suffix mappings via `register(['.py'], reader)`.
+      * Rules with optional suffix filters, predicates and MIME guards.
+      * A stack-based push/pop for temporary overrides (used by HTML mode).
     """
 
     def __init__(self, default_reader: Optional[FileReader] = None) -> None:
         self._map: Dict[str, FileReader] = {}
         self._rules: List[_Rule] = []
         self._default: FileReader = default_reader or DefaultTextReader()
+        # Push/pop snapshots contain (suffix_map, rules, default_reader).
         self._stack: List[Tuple[Dict[str, FileReader], List[_Rule], FileReader]] = []
 
+    # ---- stack management ----
+
     def push(self) -> None:
+        """Save current mappings and default reader onto the stack."""
         self._stack.append((self._map.copy(), list(self._rules), self._default))
 
     def pop(self) -> None:
+        """Restore the previous snapshot from the stack if present."""
         if not self._stack:
             return
         self._map, self._rules, self._default = self._stack.pop()
 
+    # ---- registration ----
+
     def register(self, suffixes: Sequence[str], reader: FileReader) -> None:
-        norm: tuple[str, ...] = tuple(((s if s.startswith(".") else f".{s}").lower() for s in suffixes))
+        """Register `reader` for each suffix in `suffixes`."""
+        norm: tuple[str, ...] = tuple(
+            ((s if s.startswith(".") else f".{s}").lower() for s in suffixes)
+        )
         for key in norm:
             self._map[key] = reader
 
     def for_suffix(self, suffix: str) -> FileReader:
+        """Return the reader mapped to `suffix` or the default one."""
         return self._map.get(suffix.lower(), self._default)
 
+    # ---- reading ----
+
     def read_lines(self, path: Path) -> List[str]:
+        """Read file using rules (if any) or fallback to suffix mapping."""
         return self.read_lines_ex(path, hint=None)
 
     def read_lines_ex(self, path: Path, hint: Optional[ReaderHint] = None) -> List[str]:
+        """Read file with extra hints (e.g., MIME), using the best matching rule."""
         if self._rules:
             for rule in sorted(
                 (r for r in self._rules if r.predicate is not None or r.suffixes or r.mimes),
@@ -132,11 +164,15 @@ class ReaderRegistry:
                 return rule.reader.read_lines(path)
         return self.for_suffix(path.suffix).read_lines(path)
 
+    # ---- defaults & rules ----
+
     @property
     def default_reader(self) -> FileReader:
+        """Return the default reader."""
         return self._default
 
     def set_default(self, reader: FileReader) -> None:
+        """Set a new default reader."""
         self._default = reader
 
     def register_rule(
@@ -148,6 +184,7 @@ class ReaderRegistry:
         predicate: Optional[Callable[[Path], bool]] = None,
         mimes: Optional[Sequence[str]] = None,
     ) -> None:
+        """Register a selection rule with optional filters and priority."""
         norm_suffixes: Optional[tuple[str, ...]] = None
         if suffixes:
             norm_suffixes = tuple(((s if s.startswith(".") else f".{s}").lower() for s in suffixes))
@@ -156,18 +193,23 @@ class ReaderRegistry:
             _Rule(reader=reader, priority=priority, suffixes=norm_suffixes, predicate=predicate, mimes=norm_mimes)
         )
 
+    # ---- convenience helpers ----
+
     def register_temp(self, suffixes: Sequence[str], reader: FileReader) -> None:
+        """Push current mappings and register a temporary mapping for suffixes."""
         self.push()
         self.register(suffixes, reader)
 
     def restore(self) -> None:
+        """Pop a previously pushed snapshot."""
         self.pop()
 
     def snapshot_suffix_mappings(self) -> Tuple[Dict[str, FileReader], FileReader]:
+        """Return a copy of the suffix map and the default reader."""
         return (dict(self._map), self._default)
 
     def clone_suffix_only(self) -> "ReaderRegistry":
-        """Return a registry that copies only suffix→reader mappings."""
+        """Create a new registry carrying suffix mappings and default reader only."""
         cloned = ReaderRegistry(default_reader=self._default)
         for suffix, reader in self._map.items():
             cloned.register([suffix], reader)
@@ -179,7 +221,11 @@ _GLOBAL_REGISTRY: Optional[ReaderRegistry] = None
 
 
 def get_global_reader_registry(logger: Optional[logging.Logger] = None) -> ReaderRegistry:
-    """Global registry lazily initialized with sensible defaults (txt/pdf/xlsx)."""
+    """Return (and lazily initialize) the process-global reader registry.
+
+    The global registry is used as a template; per-run registries clone its
+    suffix mappings to avoid cross-run mutations.
+    """
     global _GLOBAL_REGISTRY
     if _GLOBAL_REGISTRY is None:
         log = logger or logging.getLogger("ghconcat.readers")

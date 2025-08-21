@@ -1,31 +1,23 @@
-from pathlib import Path
-from typing import Callable, Protocol, Sequence
+from __future__ import annotations
 
-# Predicate matches concrete implementation semantics: Callable[[Path], bool]
+from pathlib import Path
+from typing import Callable, Protocol, Sequence, runtime_checkable, Optional
+
+from ghconcat.core.models import ReaderHint
+
 Predicate = Callable[[Path], bool]
 
 
+@runtime_checkable
 class ReaderProtocol(Protocol):
-    """Read file-like content and return text lines (UTF-8, with trailing '\\n').
-
-    Implementations should not raise on binary/unsupported files; they should
-    return an empty list when the content cannot be decoded or is unsupported.
-    """
-
-    def read_lines(self, path: Path) -> list[str]: ...
+    def read_lines(self, path: Path) -> list[str]:
+        ...
 
 
+@runtime_checkable
 class ReaderRegistryProtocol(Protocol):
-    """Registry with suffix/predicate rules and a default reader fallback.
-
-    This Protocol mirrors the surface actually used by ghconcat components:
-      • register(...)     – suffix-to-reader mapping
-      • register_rule(...)– advanced, optional predicate-based rules
-      • push()/pop()      – reversible, scoped mappings (temporary overrides)
-      • read_lines(...)   – unified entrypoint to read files as text lines
-    """
-
-    def register(self, suffixes: Sequence[str], reader: ReaderProtocol) -> None: ...
+    def register(self, suffixes: Sequence[str], reader: ReaderProtocol) -> None:
+        ...
 
     def register_rule(
             self,
@@ -34,10 +26,18 @@ class ReaderRegistryProtocol(Protocol):
             priority: int = 0,
             suffixes: Sequence[str] | None = None,
             predicate: Predicate | None = None,
-    ) -> None: ...
+            mimes: Sequence[str] | None = None,
+    ) -> None:
+        ...
 
-    def push(self) -> None: ...
+    def push(self) -> None:
+        ...
 
-    def pop(self) -> None: ...
+    def pop(self) -> None:
+        ...
 
-    def read_lines(self, path: Path) -> list[str]: ...
+    def read_lines(self, path: Path) -> list[str]:
+        ...
+
+    def read_lines_ex(self, path: Path, hint: Optional[ReaderHint] = None) -> list[str]:
+        ...

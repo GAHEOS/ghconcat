@@ -1,28 +1,29 @@
-from typing import Optional, Protocol, Sequence, Tuple
+from __future__ import annotations
+"""Text transformer protocol definitions."""
+
 import re
-
-
-class ReplaceSpec:
-    """Lightweight marker class kept for compatibility with public imports.
-
-    Implementations may ignore this type and expose their own internal
-    representation. It remains here to keep a stable import surface.
-    """
-    # Intentionally empty; ghconcat's concrete implementation does not
-    # depend on this structure at runtime.
+from typing import Optional, Protocol, Sequence, Tuple
 
 
 class TextTransformerProtocol(Protocol):
-    """Apply replacements/preserves and text cleanups (ghconcat semantics)."""
+    """Protocol for text transformation helpers.
 
-    def parse_replace_spec(
-        self,
-        spec: str,
-    ) -> Optional[Tuple[re.Pattern[str], str, bool]]: ...
+    Implementations are expected to:
+      * Parse a replacement spec into a compiled regex rule.
+      * Apply a sequence of replace/preserve rules to a given text.
+
+    Methods:
+        parse_replace_spec: Parse a textual spec into (regex, replacement, global_flag).
+        apply_replacements: Apply a list of replace and preserve specs to `text`.
+    """
+
+    def parse_replace_spec(self, spec: str) -> Optional[Tuple[re.Pattern[str], str, bool]]:
+        ...
 
     def apply_replacements(
         self,
         text: str,
         replace_specs: Sequence[str] | None,
         preserve_specs: Sequence[str] | None,
-    ) -> str: ...
+    ) -> str:
+        ...

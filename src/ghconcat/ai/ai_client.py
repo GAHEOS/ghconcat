@@ -1,28 +1,47 @@
+# src/ghconcat/ai/ai_client.py
+from __future__ import annotations
+
+"""
+OpenAI client wrapper and model metadata.
+
+This module provides a small compatibility layer around the OpenAI SDK, offering:
+  * A normalized way to describe models via `ModelSpec`.
+  * A single entry point `OpenAIClient.generate_chat_completion(...)`
+    that hides the differences between Chat Completions and Responses APIs.
+  * Safe fallbacks and defensive error handling.
+
+Behavioral note:
+    This refactor adds type hints and docstrings and delegates token estimation
+    to TokenBudgetEstimator without changing public behavior.
+
+New in this refactor:
+    - `last_usage`: best-effort capture of real usage from the SDK response
+      (prompt_tokens, completion_tokens, total_tokens) when available.
+    - `last_finish_reason`: best-effort capture of finish reason when available.
+    - `_build_messages` now delegates to `ghconcat.ai.message_utils.build_chat_messages`
+      to eliminate duplication across the codebase.
+"""
+
 import json
 import logging
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 try:
-    import openai
+    import openai  # type: ignore
 except ModuleNotFoundError:
     openai = None
+
+from ghconcat.ai.token_budget import TokenBudgetEstimator
+from ghconcat.ai.message_utils import build_chat_messages
 
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """Static model capabilities used to tailor request payloads.
-
-    Attributes:
-        family: Model family identifier.
-        reasoning: Whether the model uses the Responses API with reasoning.
-        endpoint: Either 'chat' or 'responses'.
-        supports_temperature/top_p/penalties/logit_bias: Feature flags.
-        context_window: Optional context window tokens (None if unknown).
-        default_max_output_tokens: Fallback `max_tokens` when unspecified.
-    """
+    """Describes API capabilities and defaults for a model family."""
     family: str
     reasoning: bool
     endpoint: str
@@ -35,13 +54,15 @@ class ModelSpec:
 
 
 class OpenAIClient:
-    """Minimal OpenAI wrapper with graceful degradation when SDK/key are absent.
+    """A minimal adapter over the OpenAI SDK with robust fallbacks.
 
-    Public API is intentionally stable to preserve ghconcat behavior in tests.
+    The adapter abstracts Chat Completions vs Responses APIs and provides
+    token budgeting assistance and response metadata tracking.
     """
 
     _REASONING_PREFIXES = ("o1", "o3", "o4", "gpt-5")
     _CHAT_PREFIXES = ("gpt-4o", "gpt-5-chat")
+
     _CTX_4O = 128000
     _CTX_5_CHAT = 128000
 
@@ -118,6 +139,7 @@ class OpenAIClient:
         self._organization = organization or os.getenv("OPENAI_ORG") or None
         self._project = project or os.getenv("OPENAI_PROJECT") or None
 
+        # Lazily initialize SDK client if available; keep tests safe otherwise.
         if openai is None:
             self._client = None
         else:
@@ -127,6 +149,10 @@ class OpenAIClient:
                 organization=self._organization,
                 project=self._project,
             )
+
+        self._estimator = TokenBudgetEstimator()
+        self.last_usage: Optional[Dict[str, int]] = None
+        self.last_finish_reason: Optional[str] = None
 
     def generate_chat_completion(
         self,
@@ -143,19 +169,30 @@ class OpenAIClient:
         max_tokens: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
     ) -> str:
-        """Invoke OpenAI with either ChatCompletions or Responses depending on model."""
+        """Invoke OpenAI API using the appropriate endpoint.
+
+        Returns a best-effort text extraction or a defensive error marker string.
+        """
         if self._client is None or not self._api_key:
             self._log.warning("OpenAI SDK/API key not available.")
             return "⚠ OpenAI disabled"
 
         spec = self._resolve_model_spec(model)
         messages = self._build_messages(system_prompt, seeds_path, prompt)
+
         desired_max = self._resolve_max_tokens(spec, max_tokens)
         safe_max = self._prevalidate_and_clamp_tokens(spec, model, messages, desired_max)
 
+        self.last_usage = None
+        self.last_finish_reason = None
+
         try:
             if spec.endpoint == "responses":
-                eff = (reasoning_effort or os.getenv("GHCONCAT_AI_REASONING_EFFORT") or "medium").lower().strip()
+                eff = (
+                    (reasoning_effort or os.getenv("GHCONCAT_AI_REASONING_EFFORT") or "medium")
+                    .lower()
+                    .strip()
+                )
                 if eff not in {"low", "medium", "high"}:
                     eff = "medium"
                 payload: Dict[str, Any] = {
@@ -166,9 +203,16 @@ class OpenAIClient:
                     "reasoning": {"effort": eff},
                 }
                 rsp = self._client.responses.create(**payload)
+                self._record_metrics(rsp)
                 return self._extract_text(rsp) or ""
 
-            payload = {"model": model, "messages": messages, "timeout": timeout, "max_tokens": safe_max}
+            # Chat Completions
+            payload = {
+                "model": model,
+                "messages": messages,
+                "timeout": timeout,
+                "max_tokens": safe_max,
+            }
             if spec.supports_temperature and temperature is not None:
                 payload["temperature"] = temperature
             if spec.supports_top_p and top_p is not None:
@@ -177,14 +221,16 @@ class OpenAIClient:
                 payload["presence_penalty"] = presence_penalty
             if spec.supports_penalties and frequency_penalty is not None:
                 payload["frequency_penalty"] = frequency_penalty
+
             rsp = self._client.chat.completions.create(**payload)
+            self._record_metrics(rsp)
             return self._extract_text(rsp) or ""
         except Exception as exc:
             self._log.error("OpenAI error: %s", exc)
             return f"⚠ OpenAI error: {exc}"
 
     def _resolve_model_spec(self, model: str) -> ModelSpec:
-        """Resolve a model to a spec by prefix and known registry entries."""
+        """Map model name prefixes to a ModelSpec."""
         m = (model or "").lower().strip()
         if m.startswith("gpt-5-chat"):
             return self._MODEL_SPEC_REGISTRY["gpt-5-chat"]
@@ -196,30 +242,22 @@ class OpenAIClient:
             return self._MODEL_SPEC_REGISTRY["o-series"]
         return self._MODEL_SPEC_REGISTRY["generic-chat"]
 
-    def _build_messages(self, system_prompt: str, seeds_path: Optional[Path], user_prompt: str) -> List[Dict[str, str]]:
-        """Build a simple message array for chat/responses endpoints."""
-        messages: List[Dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        if seeds_path and seeds_path.exists():
-            for line in seeds_path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if isinstance(obj, dict) and {"role", "content"} <= set(obj.keys()):
-                        role = str(obj["role"])
-                        content = str(obj["content"])
-                        messages.append({"role": role, "content": content})
-                    else:
-                        messages.append({"role": "user", "content": line.strip()})
-                except json.JSONDecodeError:
-                    messages.append({"role": "user", "content": line.strip()})
-        messages.append({"role": "user", "content": user_prompt})
-        return messages
+    def _build_messages(
+        self, system_prompt: str, seeds_path: Optional[Path], user_prompt: str
+    ) -> List[Dict[str, str]]:
+        """Delegate message construction to the shared utility.
+
+        Keeping this method preserves the internal structure and allows
+        targeted testing while eliminating code duplication.
+        """
+        return build_chat_messages(
+            system_prompt=system_prompt,
+            seeds_path=seeds_path,
+            user_prompt=user_prompt,
+        )
 
     def _resolve_max_tokens(self, spec: ModelSpec, explicit: Optional[int]) -> int:
-        """Choose an explicit max_tokens, env override, or fall back to spec default."""
+        """Resolve explicit / env / default max tokens."""
         if isinstance(explicit, int) and explicit > 0:
             return explicit
         env_val = os.getenv("GHCONCAT_AI_MAX_TOKENS")
@@ -233,50 +271,45 @@ class OpenAIClient:
         return spec.default_max_output_tokens
 
     def _prevalidate_and_clamp_tokens(
-        self, spec: ModelSpec, model: str, messages: List[Dict[str, str]], desired_max: int
+        self,
+        spec: ModelSpec,
+        model: str,
+        messages: List[Dict[str, str]],
+        desired_max: int,
     ) -> int:
-        """Clamp `max_tokens` to available context when the model has a fixed window."""
+        """Clamp `max_tokens` based on estimated available context."""
         if not spec.context_window:
             return desired_max
-        used = self._estimate_tokens(messages, model)
-        available_for_output = max(1, spec.context_window - used)
-        if desired_max > available_for_output:
+        est = self._estimator.estimate_messages_tokens(
+            messages, model=model, context_window=spec.context_window
+        )
+        if est.tokens_available_for_output is not None and desired_max > est.tokens_available_for_output:
             self._log.warning(
                 "max tokens reduced: requested=%d, available=%d (model=%s, ctx=%s)",
                 desired_max,
-                available_for_output,
+                est.tokens_available_for_output,
                 model,
                 spec.context_window,
             )
-            return available_for_output
-        return desired_max
-
-    def _estimate_tokens(self, messages: Iterable[Dict[str, str]], model: str) -> int:
-        """Best-effort token estimation (falls back to char/4 heuristic)."""
-        text = "\n".join((str(m.get("role", "")) + ": " + str(m.get("content", "")) for m in messages))
-        try:
-            import tiktoken  # type: ignore
-            try:
-                enc = tiktoken.encoding_for_model(model)
-            except Exception:
-                enc = tiktoken.get_encoding("cl100k_base")
-            return len(enc.encode(text))
-        except Exception:
-            pass
-        return max(1, (len(text) + 3) // 4)
+        return self._estimator.clamp_max_output(desired_max, est.tokens_available_for_output)
 
     @staticmethod
     def _extract_text(api_result: Any) -> str:
-        """Extract text from both ChatCompletions and Responses objects."""
+        """Best-effort extraction of text from various OpenAI SDK result shapes."""
+        # Responses API convenience
         txt = getattr(api_result, "output_text", None)
         if isinstance(txt, str) and txt.strip():
             return txt
+
+        # Chat Completions API
         try:
             choices = getattr(api_result, "choices", None)
             if choices and choices[0].message and choices[0].message.content:
                 return str(choices[0].message.content)
         except Exception:
             pass
+
+        # Responses API "output" array
         try:
             out = getattr(api_result, "output", None)
             if isinstance(out, list):
@@ -292,4 +325,112 @@ class OpenAIClient:
                     return "\n".join(chunks)
         except Exception:
             pass
+
+        # Fallback: stringify the object
         return str(api_result or "").strip()
+
+    def _record_metrics(self, rsp: Any) -> None:
+        """Capture best-effort usage and finish_reason fields."""
+        try:
+            self.last_usage = self._extract_usage(rsp)
+        except Exception:
+            self.last_usage = None
+        try:
+            self.last_finish_reason = self._extract_finish_reason(rsp)
+        except Exception:
+            self.last_finish_reason = None
+
+    @staticmethod
+    def _getattr_path(obj: Any, path: str) -> Any:
+        """Helper to chain getattr calls safely."""
+        cur = obj
+        for name in path.split("."):
+            cur = getattr(cur, name, None)
+            if cur is None:
+                return None
+        return cur
+
+    def _extract_usage(self, rsp: Any) -> Optional[Dict[str, int]]:
+        """Extract usage metrics from diverse SDK result shapes."""
+        candidates = [
+            self._getattr_path(rsp, "usage"),
+            self._getattr_path(rsp, "response"),
+            self._getattr_path(rsp, "response.usage"),
+            self._getattr_path(rsp, "meta.usage"),
+        ]
+        usage_obj = None
+        for cand in candidates:
+            if cand and hasattr(cand, "prompt_tokens"):
+                usage_obj = cand
+                break
+            if isinstance(cand, dict) and "prompt_tokens" in cand:
+                usage_obj = cand
+                break
+            if cand and hasattr(cand, "usage"):
+                inner = getattr(cand, "usage", None)
+                if inner is not None:
+                    usage_obj = inner
+                    break
+
+        if usage_obj is None:
+            return None
+
+        def _as_int(v: Any) -> Optional[int]:
+            try:
+                return int(v)
+            except Exception:
+                return None
+
+        if isinstance(usage_obj, dict):
+            return {
+                k: v
+                for k, v in {
+                    "prompt_tokens": _as_int(usage_obj.get("prompt_tokens")),
+                    "completion_tokens": _as_int(usage_obj.get("completion_tokens")),
+                    "total_tokens": _as_int(usage_obj.get("total_tokens")),
+                }.items()
+                if v is not None
+            }
+        return {
+            k: v
+            for k, v in {
+                "prompt_tokens": _as_int(getattr(usage_obj, "prompt_tokens", None)),
+                "completion_tokens": _as_int(getattr(usage_obj, "completion_tokens", None)),
+                "total_tokens": _as_int(getattr(usage_obj, "total_tokens", None)),
+            }.items()
+            if v is not None
+        }
+
+    def _extract_finish_reason(self, rsp: Any) -> Optional[str]:
+        """Extract finish_reason from multiple possible locations."""
+        try:
+            choices = getattr(rsp, "choices", None)
+            if choices:
+                first = choices[0]
+                val = getattr(first, "finish_reason", None)
+                if val:
+                    return str(val)
+                if isinstance(first, dict) and first.get("finish_reason"):
+                    return str(first["finish_reason"])
+        except Exception:
+            pass
+        try:
+            resp = self._getattr_path(rsp, "response")
+            if resp:
+                choices = getattr(resp, "choices", None)
+                if choices:
+                    first = choices[0]
+                    val = getattr(first, "finish_reason", None)
+                    if val:
+                        return str(val)
+                    if isinstance(first, dict) and first.get("finish_reason"):
+                        return str(first["finish_reason"])
+        except Exception:
+            pass
+        try:
+            val = getattr(rsp, "finish_reason", None)
+            if val:
+                return str(val)
+        except Exception:
+            pass
+        return None

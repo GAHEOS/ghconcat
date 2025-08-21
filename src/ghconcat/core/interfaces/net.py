@@ -1,25 +1,20 @@
+from __future__ import annotations
 from pathlib import Path
-from typing import List, Protocol, Sequence, runtime_checkable
+from typing import List, Protocol, Sequence, runtime_checkable, Optional, Callable
 
 from ghconcat.core.models import FetchRequest, FetchResponse
 
 
+@runtime_checkable
 class HTTPTransportProtocol(Protocol):
-    """Thin HTTP transport abstraction to enable custom implementations."""
-
     def request(self, req: FetchRequest) -> FetchResponse:
-        """Perform a HTTP request and return a response object."""
         ...
 
 
 @runtime_checkable
 class UrlFetcherProtocol(Protocol):
-    """High-level URL fetcher that can download and scrape content."""
-
     def fetch(self, urls: Sequence[str]) -> List[Path]:
-        """Download a list of URLs into workspace cache, returning local paths."""
         ...
-
     def scrape(
         self,
         seeds: Sequence[str],
@@ -29,12 +24,27 @@ class UrlFetcherProtocol(Protocol):
         max_depth: int,
         same_host_only: bool,
     ) -> List[Path]:
-        """Breadth-first scrape following links, saving matched documents."""
         ...
 
 
+@runtime_checkable
 class UrlFetcherFactoryProtocol(Protocol):
-    """Callable factory that builds a `UrlFetcherProtocol` bound to a workspace."""
-
     def __call__(self, workspace: Path) -> UrlFetcherProtocol:
+        ...
+
+
+@runtime_checkable
+class UrlAcceptPolicyProtocol(Protocol):
+    """Policy for URL acceptance, naming and traversal decisions."""
+
+    def decide_local_name(self, url: str, idx: int, content_type: str, *, mode: str) -> str:
+        ...
+
+    def allowed_by_suffix(self, url: str, *, include: Sequence[str], exclude: Sequence[str]) -> bool:
+        ...
+
+    def allow_follow(self, abs_url: str, *, base_url: str, same_host_only: bool) -> bool:
+        ...
+
+    def is_binary_type(self, content_type: str) -> bool:
         ...

@@ -1,4 +1,5 @@
-# src/ghconcat/core/interfaces/factories.py
+from __future__ import annotations
+
 """
 core.interfaces.factories – Protocols for DI factories (Walker/Renderer/PathResolver).
 

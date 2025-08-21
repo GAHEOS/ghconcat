@@ -1,13 +1,11 @@
+from __future__ import annotations
+
 """
-AI processor component for ghconcat.
+AI processing adapter.
 
-This module provides:
-  • AIProcessorProtocol – now defined in ghconcat.core.interfaces.ai.
-  • AIProcessor         – thin wrapper around an injected OpenAI bridge.
-  • DefaultAIProcessor  – explicit default implementation.
-
-The bridge callable matches the legacy `_call_openai(...)` signature so
-current tests and behavior remain unchanged.
+This module keeps a very small, test-friendly adapter that forwards calls
+to the CLI-level `_call_openai` function. We keep the argument mapping
+exactly as-is to preserve test behavior.
 """
 
 import logging
@@ -18,14 +16,15 @@ from ghconcat.core.interfaces.ai import AIProcessorProtocol
 
 
 class AIProcessor(AIProcessorProtocol):
-    """Thin wrapper to call the injected OpenAI bridge."""
+    """Thin adapter that delegates to a callable following `_call_openai` shape."""
 
-    def __init__(
-        self,
-        *,
-        call_openai,
-        logger: Optional[logging.Logger] = None,
-    ) -> None:
+    def __init__(self, *, call_openai, logger: Optional[logging.Logger] = None) -> None:
+        """Initialize the adapter.
+
+        Args:
+            call_openai: Callable compatible with the CLI `_call_openai`.
+            logger: Optional logger for diagnostics.
+        """
         self._call = call_openai
         self._log = logger or logging.getLogger("ghconcat.ai.proc")
 
@@ -44,7 +43,26 @@ class AIProcessor(AIProcessorProtocol):
         max_tokens: Optional[int],
         reasoning_effort: Optional[str],
     ) -> None:
-        """Invoke the OpenAI bridge with the provided parameters."""
+        """Run the AI call and store the result to `out_path`.
+
+        Notes:
+            The CLI layer expects the short parameter names `presence_pen` and
+            `freq_pen`. We intentionally forward with those exact names to keep
+            compatibility with tests that patch and assert kwargs.
+
+        Args:
+            prompt: Input text to process with the model.
+            out_path: Destination file path for the AI output.
+            model: Model name.
+            system_prompt: System prompt to prepend.
+            temperature: Sampling temperature (chat models only).
+            top_p: Nucleus sampling parameter (chat models only).
+            presence_penalty: Presence penalty (chat models only).
+            frequency_penalty: Frequency penalty (chat models only).
+            seeds_path: Optional JSONL seeds file.
+            max_tokens: Maximum output tokens.
+            reasoning_effort: Reasoning effort for o-series / gpt-5.
+        """
         self._call(
             prompt,
             out_path,
@@ -61,5 +79,5 @@ class AIProcessor(AIProcessorProtocol):
 
 
 class DefaultAIProcessor(AIProcessor):
-    """Default implementation; explicit subclass for DI clarity."""
+    """Default concrete processor. No extra behavior added."""
     pass

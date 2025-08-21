@@ -1,28 +1,47 @@
 from __future__ import annotations
 
+"""
+Detailed runtime execution report.
+
+New (opt-in) AI token metrics:
+- ai_tokens_in: Optional[int]
+- ai_tokens_out: Optional[int]
+- ai_model_ctx_window: Optional[int]
+
+New in this refactor (best-effort real metrics if available):
+- ai_finish_reason: Optional[str]
+- ai_usage_prompt: Optional[int]
+- ai_usage_completion: Optional[int]
+- ai_usage_total: Optional[int]
+
+These fields are filled only when --ai is used and data is available.
+"""
+
 import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 
 @dataclass
 class ExecutionReport:
-    """Run-level metrics aggregated across contexts."""
-
     started_at: float = field(default_factory=time.perf_counter)
     finished_at: float | None = None
     duration_s: float | None = None
 
-    # High-level counts
     contexts: int = 0
-    files_total: int = 0
-    files_by_source: Dict[str, int] = field(default_factory=lambda: {"local": 0, "git": 0, "url": 0, "scrape": 0})
-    bytes_total: int = 0
-    bytes_by_source: Dict[str, int] = field(default_factory=lambda: {"local": 0, "git": 0, "url": 0, "scrape": 0})
 
-    # Timing by stage (sum across contexts)
+    files_total: int = 0
+    files_by_source: Dict[str, int] = field(
+        default_factory=lambda: {"local": 0, "git": 0, "url": 0, "scrape": 0}
+    )
+
+    bytes_total: int = 0
+    bytes_by_source: Dict[str, int] = field(
+        default_factory=lambda: {"local": 0, "git": 0, "url": 0, "scrape": 0}
+    )
+
     time_by_stage: Dict[str, float] = field(
         default_factory=lambda: {
             "local_discovery": 0.0,
@@ -39,6 +58,17 @@ class ExecutionReport:
     workspaces: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
+    # Token estimation (always best-effort)
+    ai_tokens_in: Optional[int] = None
+    ai_tokens_out: Optional[int] = None
+    ai_model_ctx_window: Optional[int] = None
+
+    # Best-effort real usage and finish reason (populated if available)
+    ai_finish_reason: Optional[str] = None
+    ai_usage_prompt: Optional[int] = None
+    ai_usage_completion: Optional[int] = None
+    ai_usage_total: Optional[int] = None
+
     def add_paths(self, paths: Iterable[Path], *, source: str) -> None:
         count = 0
         total_bytes = 0
@@ -47,7 +77,6 @@ class ExecutionReport:
             try:
                 total_bytes += p.stat().st_size
             except Exception:
-                # tolerate removed/virtual entries
                 pass
         self.files_total += count
         self.files_by_source[source] = self.files_by_source.get(source, 0) + count
@@ -67,7 +96,9 @@ class ExecutionReport:
 
     def finish(self) -> None:
         self.finished_at = time.perf_counter()
-        self.duration_s = (self.finished_at - self.started_at) if self.finished_at else None
+        self.duration_s = (
+            self.finished_at - self.started_at if self.finished_at else None
+        )
 
     def to_json(self, *, indent: int = 2) -> str:
         return json.dumps(
@@ -84,14 +115,19 @@ class ExecutionReport:
                 "roots": self.roots,
                 "workspaces": self.workspaces,
                 "errors": self.errors,
+                "ai_tokens_in": self.ai_tokens_in,
+                "ai_tokens_out": self.ai_tokens_out,
+                "ai_model_ctx_window": self.ai_model_ctx_window,
+                "ai_finish_reason": self.ai_finish_reason,
+                "ai_usage_prompt": self.ai_usage_prompt,
+                "ai_usage_completion": self.ai_usage_completion,
+                "ai_usage_total": self.ai_usage_total,
             },
             indent=indent,
         )
 
 
 class StageTimer:
-    """Context manager that measures a stage and reports into ExecutionReport."""
-
     def __init__(self, report: ExecutionReport, stage: str):
         self._report = report
         self._stage = stage
@@ -104,5 +140,4 @@ class StageTimer:
     def __exit__(self, exc_type, exc, tb):
         if self._t0 is not None:
             self._report.add_time(self._stage, time.perf_counter() - self._t0)
-        # do not suppress exceptions
         return False

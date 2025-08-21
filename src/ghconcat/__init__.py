@@ -1,7 +1,6 @@
 from __future__ import annotations
-
 import logging
-from typing import Callable, Dict, Optional, Set
+from typing import Optional
 
 from .core import (
     GitManagerFactoryProtocol,
@@ -17,20 +16,10 @@ from .core import (
     DefaultWalkerFactory,
     DefaultUrlFetcherFactory,
 )
+from ghconcat.constants import HEADER_DELIM
+from ghconcat.cli import GhConcat
 from ghconcat.discovery.git_repository import GitRepositoryManager
 from ghconcat.discovery.url_fetcher import UrlFetcher
-from ghconcat.cli import (
-    GhConcat,
-    HEADER_DELIM,
-    _call_openai,
-    _perform_upgrade,
-    _build_parser,
-    _post_parse,
-    _merge_ns,
-    _apply_replacements,
-    _expand_tokens,
-    _parse_env_items,
-)
 from ghconcat.io.excel_reader import ExcelTsvExporter
 from ghconcat.io.file_reader_service import FileReadingService
 from ghconcat.io.html_reader import HtmlToTextReader
@@ -65,84 +54,90 @@ from ghconcat.core.interfaces.classifier import InputClassifierProtocol
 from ghconcat.processing.input_classifier import DefaultInputClassifier
 from ghconcat.discovery.file_discovery import FileDiscovery
 from ghconcat.runtime.container import EngineBuilder, EngineConfig
-from ghconcat.runtime.policies import DefaultPolicies  # NEW
+from ghconcat.runtime.policies import DefaultPolicies
+from ghconcat.runtime.runner import EngineRunner
 from ghconcat.utils.net import ssl_context_for as _ssl_ctx_for
+from ghconcat.parsing.parser import _build_parser
+from ghconcat.runtime.sdk import _call_openai, _perform_upgrade
 
-__version__ = "0.9.0"
+__version__ = '0.9.1'
 
 
 def renderer_factory(
-        *,
-        walker,
-        template_engine: Optional[TemplateEngineProtocol] = None,
-        header_delim: str = HEADER_DELIM,
-        logger: Optional[logging.Logger] = None,
+    *, walker, template_engine: Optional[TemplateEngineProtocol] = None,
+    header_delim: str = HEADER_DELIM, logger: Optional[logging.Logger] = None,
 ) -> Renderer:
-    """Convenience factory for a Renderer instance."""
+    """
+    Build a Renderer with sensible defaults.
+    """
     engine = template_engine or SingleBraceTemplateEngine(logger=logger)
     factory = DefaultRendererFactory()
-    lg = logger or logging.getLogger("ghconcat")
+    lg = logger or logging.getLogger('ghconcat')
     return factory(walker=walker, template_engine=engine, header_delim=header_delim, logger=lg)
 
 
 def path_resolver_factory(*, workspace: Optional[str] = None) -> WorkspaceAwarePathResolver:
-    """Convenience factory for a workspace-aware resolver."""
+    """
+    Build a WorkspaceAwarePathResolver, optionally binding a workspace.
+    """
     from pathlib import Path as _P
-
     ws = _P(workspace) if workspace else None
     factory = DefaultPathResolverFactory(builder=lambda: WorkspaceAwarePathResolver(workspace=ws))
     return factory()
 
 
 __all__ = [
-    "GhConcat",
-    "HEADER_DELIM",
-    "WalkerAppender",
-    "UrlFetcher",
-    "PdfTextExtractor",
-    "ExcelTsvExporter",
-    "FileReader",
-    "ReaderRegistry",
-    "get_global_reader_registry",
-    "DefaultTextReader",
-    "PdfFileReader",
-    "ExcelFileReader",
-    "HtmlToTextReader",
-    "OpenAIClient",
-    "GitRepositoryManager",
-    "TextTransformer",
-    "EnvContext",
-    "ExecutionEngine",
-    "PathResolverProtocol",
-    "RendererProtocol",
-    "AIProcessorProtocol",
-    "GitRepositoryManagerProtocol",
-    "GitManagerFactoryProtocol",
-    "UrlFetcherProtocol",
-    "UrlFetcherFactoryProtocol",
-    "FileReadingService",
-    "LineProcessingService",
-    "StringInterpolator",
-    "_perform_upgrade",
-    "COMMENT_RULES",
-    "Renderer",
-    "FileDiscovery",
-    "DefaultPathResolver",
-    "WorkspaceAwarePathResolver",
-    "SingleBraceTemplateEngine",
-    "TemplateEngineProtocol",
-    "renderer_factory",
-    "path_resolver_factory",
-    "WalkerFactoryProtocol",
-    "RendererFactoryProtocol",
-    "PathResolverFactoryProtocol",
-    "DefaultWalkerFactory",
-    "DefaultRendererFactory",
-    "DefaultPathResolverFactory",
-    "DefaultLoggerFactory",
-    "InputClassifierProtocol",
-    "DefaultInputClassifier",
-    "EngineBuilder",
-    "EngineConfig",
-    "DefaultPolicies",
+    'GhConcat',
+    'HEADER_DELIM',
+    'WalkerAppender',
+    'UrlFetcher',
+    'PdfTextExtractor',
+    'ExcelTsvExporter',
+    'FileReader',
+    'ReaderRegistry',
+    'get_global_reader_registry',
+    'DefaultTextReader',
+    'PdfFileReader',
+    'ExcelFileReader',
+    'HtmlToTextReader',
+    'OpenAIClient',
+    'GitRepositoryManager',
+    'TextTransformer',
+    'EnvContext',
+    'ExecutionEngine',
+    'PathResolverProtocol',
+    'RendererProtocol',
+    'AIProcessorProtocol',
+    'GitRepositoryManagerProtocol',
+    'GitManagerFactoryProtocol',
+    'UrlFetcherProtocol',
+    'UrlFetcherFactoryProtocol',
+    'FileReadingService',
+    'LineProcessingService',
+    'StringInterpolator',
+    'COMMENT_RULES',
+    'Renderer',
+    'FileDiscovery',
+    'DefaultPathResolver',
+    'WorkspaceAwarePathResolver',
+    'SingleBraceTemplateEngine',
+    'TemplateEngineProtocol',
+    'renderer_factory',
+    'path_resolver_factory',
+    'WalkerFactoryProtocol',
+    'RendererFactoryProtocol',
+    'PathResolverFactoryProtocol',
+    'DefaultWalkerFactory',
+    'DefaultRendererFactory',
+    'DefaultPathResolverFactory',
+    'DefaultLoggerFactory',
+    'InputClassifierProtocol',
+    'DefaultInputClassifier',
+    'EngineBuilder',
+    'EngineConfig',
+    'DefaultPolicies',
+    'EngineRunner',
+    '_call_openai',
+    '_perform_upgrade',
+    '_build_parser',
 ]

@@ -1,5 +1,10 @@
-from typing import Mapping, Protocol
+from __future__ import annotations
+from typing import Mapping, Protocol, runtime_checkable
 
+
+@runtime_checkable
 class TemplateEngineProtocol(Protocol):
-    """Single-brace templating compatible with current CLI semantics."""
-    def render(self, template: str, variables: Mapping[str, str]) -> str: ...
+    """Protocol for very small, string-based template engines."""
+
+    def render(self, template: str, variables: Mapping[str, str]) -> str:
+        ...

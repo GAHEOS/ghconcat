@@ -82,6 +82,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "Disabled by default to confine scraping to the original domain."
         ),
     )
+    g_loc.add_argument('--url-policy', metavar='module:Class', dest='url_policy_ref',
+                       help='Custom UrlAcceptPolicy implementation (advanced).', default=None)
+
     g_loc.add_argument(
         "-s", "--suffix", metavar="SUF", action="append", dest="suffix",
         help=(
