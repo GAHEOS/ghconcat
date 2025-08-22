@@ -15,7 +15,8 @@ from ghconcat.parsing.tokenizer import DirectiveTokenizer
 from ghconcat.runtime.sdk import _call_openai, _perform_upgrade
 from ghconcat.processing.input_classifier import DefaultInputClassifier
 from ghconcat.core.interfaces.classifier import InputClassifierProtocol
-from ghconcat.plugins.registry import apply_policy_set, get_classifier
+from ghconcat.plugins.registry import get_classifier
+from ghconcat.runtime.policies import apply_policies  # ← unified policies
 from ghconcat.logging.helpers import get_logger
 from ghconcat.runtime.wiring import build_engine_config, build_engine
 from ghconcat.runtime.helpers import NamespaceMerger
@@ -55,7 +56,7 @@ def _make_classifier(ns: argparse.Namespace) -> InputClassifierProtocol:
            - 'plugin:<name>' uses registry factories
            - 'module.path:ClassName' uses dynamic import
            - 'none' → default classifier
-        2) Policy set preset (--classifier-policies), default 'standard'
+        2) Policies via runtime.policies.apply_policies (preset default 'standard')
     """
     ref = getattr(ns, 'classifier_ref', None) or os.getenv('GHCONCAT_CLASSIFIER') or ''
     ref = (ref or '').strip()
@@ -81,7 +82,7 @@ def _make_classifier(ns: argparse.Namespace) -> InputClassifierProtocol:
     preset = (getattr(ns, 'classifier_policies', 'standard') or 'standard').lower()
     if preset != 'none':
         try:
-            classifier = apply_policy_set(preset, classifier)
+            classifier = apply_policies(classifier, preset)  # ← single point
         except Exception as exc:
             logger.warning('⚠  failed to apply policy set %r: %s; continuing without policies', preset, exc)
     return classifier

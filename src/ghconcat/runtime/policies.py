@@ -1,26 +1,27 @@
 from __future__ import annotations
 
-"""'Policy registration and plugin loading for input classification.
+"""
+Policy registration and plugin loading for input classification.
 
 This extends the existing DefaultPolicies with a small plugin system:
 
 - `apply_policies(classifier, preset)` applies the built-in preset
   (e.g., "standard") and then loads optional plugins:
-    * entry-points group: \'ghconcat.policies\' → each entry provides a
+    * entry-points group: 'ghconcat.policies' → each entry provides a
       callable like `def register(classifier) -> None: ...`
-    * env var GHCONCAT_POLICY_PLUGINS: comma-separated \'module:callable\'
+    * env var GHCONCAT_POLICY_PLUGINS: comma-separated 'module:callable'
       references that will be imported and called in order.
 
-The default behavior (preset=\'standard\') remains identical to earlier
+The default behavior (preset='standard') remains identical to earlier
 versions, keeping full backwards compatibility for tests and callers.
-'"""
+"""
 
 import logging
 import os
 from typing import Callable
 
 from ghconcat.core.interfaces.classifier import InputClassifierProtocol
-from ghconcat.utils.imports import load_object_from_ref  # ← unified dynamic import
+from ghconcat.utils.imports import load_object_from_ref  # unified dynamic import
 
 logger = logging.getLogger('ghconcat.policies')
 
@@ -28,6 +29,8 @@ logger = logging.getLogger('ghconcat.policies')
 class DefaultPolicies:
     @staticmethod
     def register_standard(classifier: InputClassifierProtocol) -> InputClassifierProtocol:
+        """Register default 'standard' URL/Git classification policies."""
+
         def _is_git_scheme(token: str) -> bool:
             t = (token or '').strip().lower()
             return t.startswith('ssh://') or t.startswith('git://')
@@ -51,7 +54,7 @@ def _load_env_plugins(classifier: InputClassifierProtocol) -> None:
         return
     for ref in (s.strip() for s in spec.split(',') if s.strip()):
         try:
-            fn = load_object_from_ref(ref)  # ← replaces ad-hoc import logic
+            fn = load_object_from_ref(ref)
             if not callable(fn):
                 logger.warning('⚠  policy plugin %r is not callable; skipped', ref)
                 continue
@@ -80,6 +83,7 @@ def _load_entrypoint_plugins(classifier: InputClassifierProtocol) -> None:
 
 
 def apply_policies(classifier: InputClassifierProtocol, preset: str) -> InputClassifierProtocol:
+    """Apply the given preset and load environment/entrypoint plugins."""
     if (preset or 'standard').lower() == 'standard':
         DefaultPolicies.register_standard(classifier)
     _load_entrypoint_plugins(classifier)

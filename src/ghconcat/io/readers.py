@@ -18,7 +18,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from ghconcat.io.pdf_reader import PdfTextExtractor
 from ghconcat.io.excel_reader import ExcelTsvExporter
 from ghconcat.core.models import ReaderHint
-from ghconcat.utils.suffixes import normalize_suffixes  # ← reuse shared helper
+from ghconcat.utils.suffixes import normalize_suffixes  # reuse shared helper
 
 
 class FileReader(ABC):
@@ -59,8 +59,7 @@ class PdfFileReader(FileReader):
         text = self._extractor.extract_text(path)
         if not text:
             return []
-        return [ln + (''
-                      '') for ln in text.splitlines()]
+        return [ln + '\n' for ln in text.splitlines()]
 
 
 class ExcelFileReader(FileReader):
