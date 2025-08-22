@@ -12,18 +12,18 @@
 # -------------------------------------------------------------------------------
 [sources]
 // Two open‑access papers (HTML render)
--F https://arxiv.org/abs/2303.11366     # Integrated Photonics for Quantum Computing
--F https://arxiv.org/abs/2210.10255     # Boson sampling in the noisy intermediate scale
--d 0
+-a https://arxiv.org/abs/2303.11366     # Integrated Photonics for Quantum Computing
+-a https://arxiv.org/abs/2210.10255     # Boson sampling in the noisy intermediate scale
+
 
 -K                                      # clean text (remove html tags, scripts, etc)
 -s .html -C -i -u web-research -h       # clean & wrap
--o workspace/sources.md                           # expose as {sources}
+-o workspace/sources.md                 # expose as {sources}
 
 [notes]
 -a notes/
 -s .md -u note -h                       # clean & wrap
--o workspace/notes.md                             # expose as {sources}
+-o workspace/notes.md                   # expose as {sources}
 
 # -------------------------------------------------------------------------------
 # 1 · Junior researcher draft  →  junior                                        //
