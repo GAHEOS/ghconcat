@@ -1,4 +1,3 @@
-# src/ghconcat/rendering/execution.py
 from __future__ import annotations
 import argparse
 import json
@@ -21,7 +20,7 @@ from ghconcat.parsing.directives import DirNode
 from ghconcat.parsing.list_ops import split_list
 from ghconcat.processing.input_classifier import DefaultInputClassifier
 from ghconcat.core.models import ContextConfig
-from ghconcat.runtime.flag_mapping import context_to_argv  # ← unified builder
+from ghconcat.runtime.flag_mapping import context_to_argv  # canonical argv builder
 from ghconcat.ai.token_budget import TokenBudgetEstimator
 from ghconcat.ai.message_utils import build_chat_messages
 from ghconcat.ai.model_registry import context_window_for
@@ -29,7 +28,21 @@ from ghconcat.logging.helpers import get_logger
 
 
 class ExecutionEngine:
-    """Core execution engine wiring discovery, rendering and AI."""
+    """High-level executor that turns directive nodes into concatenated output.
+
+    Responsibilities:
+        * Parse/merge CLI-like tokens (per context).
+        * Discover sources (local, git, URLs, scrape).
+        * Concatenate + optional template render.
+        * Optional AI call and token accounting.
+        * Emit report metrics.
+
+    Backward-compatibility:
+        This class preserves the visible behavior used by the CLI/tests. The only
+        change in this refactor is the removal of a duplicated token-builder:
+        we now reuse `runtime.flag_mapping.context_to_argv` instead of keeping an
+        internal `_tokens_from_context` clone.
+    """
 
     def __init__(
         self,
@@ -62,7 +75,7 @@ class ExecutionEngine:
         self._ai = ai
         self._workspaces_seen = workspaces_seen
         self._fatal = fatal
-        self._log = logger or get_logger('exec')
+        self._log = logger or get_logger("exec")
         self._report = report or ExecutionReport()
 
         if registry is not None:
@@ -70,10 +83,16 @@ class ExecutionEngine:
         elif registry_factory is not None:
             self._registry = registry_factory()
         else:
+            # Clone suffix-only mappings to avoid side effects across runs.
             self._registry = get_global_reader_registry(self._log).clone_suffix_only()
 
+        # Fast line reader bound to this registry
         self._read_file_as_lines = lambda fp: self._registry.read_lines(fp)
-        self._strict_ws = os.getenv('GHCONCAT_STRICT_WS') == '1'
+
+        # Optional workspace strictness
+        self._strict_ws = os.getenv("GHCONCAT_STRICT_WS") == "1"
+
+        # Optional classifier (DefaultInputClassifier by default)
         self._classifier: InputClassifierProtocol = classifier or DefaultInputClassifier()
 
     def _resolve_root_and_workspace(
@@ -83,58 +102,58 @@ class ExecutionEngine:
         parent_root: Optional[Path],
         parent_workspace: Optional[Path],
     ) -> tuple[Path, Path]:
+        """Resolve both workdir (root) and workspace for the current context."""
         if ns_parent is None:
             base_for_root = Path.cwd()
-            root = self._resolver.resolve(base_for_root, ns_self.workdir or '.')
-        elif ns_self.workdir not in (None, ''):
+            root = self._resolver.resolve(base_for_root, ns_self.workdir or ".")
+        elif ns_self.workdir not in (None, ""):
             base_for_root = parent_root or Path.cwd()
             root = self._resolver.resolve(base_for_root, ns_self.workdir)
         else:
             root = parent_root or Path.cwd()
 
         if ns_parent is None:
-            if ns_self.workspace not in (None, ''):
+            if ns_self.workspace not in (None, ""):
                 workspace = self._resolver.resolve(root, ns_self.workspace)
             else:
                 workspace = root
-        elif ns_self.workspace not in (None, ''):
+        elif ns_self.workspace not in (None, ""):
             base_ws = parent_workspace or root
             workspace = self._resolver.resolve(base_ws, ns_self.workspace)
         else:
             workspace = parent_workspace or root
+
         return (root, workspace)
 
     def _configure_resolver_workspace(self, workspace: Path) -> None:
+        """Try to inject workspace root into the resolver, when supported."""
         try:
-            setter = getattr(self._resolver, 'set_workspace_root', None)
+            setter = getattr(self._resolver, "set_workspace_root", None)
             if callable(setter):
                 setter(workspace)
         except Exception:
             pass
 
     def _guard_ws(self, path: Path) -> Path:
+        """Optionally restrict paths to the configured workspace root."""
         if self._strict_ws and (not self._resolver.is_within_workspace(path)):
-            self._fatal(f'unsafe path outside workspace: {path}')
+            self._fatal(f"unsafe path outside workspace: {path}")
             raise SystemExit(1)
         return path
 
-    def _enter_html_reader_scope(
-        self, ns_effective: argparse.Namespace
-    ) -> Optional[ReaderMappingScope]:
-        if not getattr(ns_effective, 'strip_html', False):
+    def _enter_html_reader_scope(self, ns_effective: argparse.Namespace) -> Optional[ReaderMappingScope]:
+        """Optionally remap HTML readers to a textifying reader for this scope."""
+        if not getattr(ns_effective, "strip_html", False):
             return None
         scope = ReaderMappingScope(self._registry)
         scope.__enter__()
-        scope.register(['.html', '.htm', '.xhtml'], HtmlToTextReader(logger=self._log))
+        scope.register([".html", ".htm", ".xhtml"], HtmlToTextReader(logger=self._log))
         return scope
 
     @staticmethod
     def _resolve_model_ctx_window(model: str | None) -> int | None:
-        return context_window_for(model or '')
-
-    def _tokens_from_context(self, ctx: ContextConfig) -> List[str]:
-        """Delegate to the unified builder to avoid duplication."""
-        return context_to_argv(ctx)
+        """Return the context window size (tokens) for a given model, if known."""
+        return context_window_for(model or "")
 
     def execute_node(
         self,
@@ -147,51 +166,56 @@ class ExecutionEngine:
         inherited_vars: Optional[Dict[str, str]] = None,
         gh_dump: Optional[List[str]] = None,
     ) -> Tuple[Dict[str, str], str]:
-        # (código sin cambios; se mantiene idéntico salvo imports previos)
+        """Execute a directive node and return (variables, final_output)."""
         inherited_vars = inherited_vars or {}
+
+        # Expand $ENV in tokens with inheritance (local + global).
         tokens = self._expand_tokens(node.tokens, inherited_env=inherited_vars)
+
+        # Parse & normalize flags (post-parse merges flags that operate in sets)
         ns_self = self._parser_factory().parse_args(tokens)
         self._post_parse(ns_self)
+
+        # Merge with parent effective flags
         ns_effective = self._merge_ns(ns_parent, ns_self) if ns_parent else ns_self
 
         if level == 0:
             gh_dump = []
 
-        root, workspace = self._resolve_root_and_workspace(
-            ns_parent, ns_self, parent_root, parent_workspace
-        )
+        # Resolve workdir/workspace and set resolver workspace root if supported
+        root, workspace = self._resolve_root_and_workspace(ns_parent, ns_self, parent_root, parent_workspace)
         self._configure_resolver_workspace(workspace)
         self._workspaces_seen.add(workspace)
-        ns_effective.workspace = str(workspace)
+        ns_effective.workspace = str(workspace)  # keep for templates/report
+
+        # Report basic context info early
         self._report.mark_context(root=root, workspace=workspace)
 
+        # Validate root/workspace existence
         if not root.exists():
-            msg = f'--workdir {root} not found'
+            msg = f"--workdir {root} not found"
             self._report.add_error(msg)
             self._fatal(msg)
             raise SystemExit(1)
-
         if not workspace.exists():
-            msg = f'--workspace {workspace} not found'
+            msg = f"--workspace {workspace} not found"
             self._report.add_error(msg)
             self._fatal(msg)
             raise SystemExit(1)
 
+        # Optional HTML→text reader mapping
         maybe_scope = self._enter_html_reader_scope(ns_effective)
         try:
-            dump_raw = ''
+            dump_raw = ""
+
+            # Reclassify add_path/urls/git based on tokens and url depth
             self._classifier.reclassify(ns_effective)
 
-            if (
-                ns_effective.add_path
-                or ns_effective.git_path
-                or ns_effective.urls
-                or ns_effective.url_scrape
-            ):
-                suffixes = split_list(getattr(ns_effective, 'suffix', None))
-                exclude_suf = split_list(getattr(ns_effective, 'exclude_suf', None))
+            if ns_effective.add_path or ns_effective.git_path or ns_effective.urls or ns_effective.url_scrape:
+                suffixes = split_list(getattr(ns_effective, "suffix", None))
+                exclude_suf = split_list(getattr(ns_effective, "exclude_suf", None))
 
-                with StageTimer(self._report, 'local_discovery'):
+                with StageTimer(self._report, "local_discovery"):
                     local_files = self._discovery.gather_local(
                         add_paths=ns_effective.add_path,
                         exclude_paths=ns_effective.exclude_path,
@@ -199,9 +223,9 @@ class ExecutionEngine:
                         exclude_suf=exclude_suf,
                         root=root,
                     )
-                self._report.add_paths(local_files, source='local')
+                self._report.add_paths(local_files, source="local")
 
-                with StageTimer(self._report, 'git_collect'):
+                with StageTimer(self._report, "git_collect"):
                     git_files = self._discovery.collect_git(
                         git_specs=ns_effective.git_path,
                         git_exclude=ns_effective.git_exclude,
@@ -209,47 +233,47 @@ class ExecutionEngine:
                         suffixes=suffixes,
                         exclude_suf=exclude_suf,
                     )
-                self._report.add_paths(git_files, source='git')
+                self._report.add_paths(git_files, source="git")
 
-                with StageTimer(self._report, 'url_fetch'):
-                    remote_files = self._discovery.fetch_urls(
-                        urls=ns_effective.urls, workspace=workspace
-                    )
-                self._report.add_paths(remote_files, source='url')
+                with StageTimer(self._report, "url_fetch"):
+                    remote_files = self._discovery.fetch_urls(urls=ns_effective.urls, workspace=workspace)
+                self._report.add_paths(remote_files, source="url")
 
-                with StageTimer(self._report, 'url_scrape'):
+                with StageTimer(self._report, "url_scrape"):
                     scraped_files = self._discovery.scrape_urls(
                         seeds=ns_effective.url_scrape,
                         workspace=workspace,
                         suffixes=suffixes,
                         exclude_suf=exclude_suf,
-                        max_depth=getattr(ns_effective, 'url_depth', 0) or 0,
-                        same_host_only=not getattr(ns_effective, 'url_cross_domain', False),
+                        max_depth=getattr(ns_effective, "url_depth", 0) or 0,
+                        same_host_only=not getattr(ns_effective, "url_cross_domain", False),
                     )
-                self._report.add_paths(scraped_files, source='scrape')
+                self._report.add_paths(scraped_files, source="scrape")
 
                 files = [*local_files, *remote_files, *scraped_files, *git_files]
                 if files:
-                    with StageTimer(self._report, 'concat'):
-                        dump_raw = self._renderer.concat(
-                            files, ns_effective, header_root=root
-                        )
+                    with StageTimer(self._report, "concat"):
+                        dump_raw = self._renderer.concat(files, ns_effective, header_root=root)
         finally:
             if maybe_scope is not None:
                 maybe_scope.__exit__(None, None, None)
 
+        # Prepare variables visible to templates/children
         ctx_name = node.name
-        global_env_map = self._parse_env_items(getattr(ns_effective, 'global_env', None))
-        local_env_map = self._parse_env_items(getattr(ns_effective, 'env_vars', None))
+        global_env_map = self._parse_env_items(getattr(ns_effective, "global_env", None))
+        local_env_map = self._parse_env_items(getattr(ns_effective, "env_vars", None))
+
         inherited_for_children = {**(inherited_vars or {}), **global_env_map}
         vars_local = {**inherited_for_children, **local_env_map}
 
         if ctx_name:
-            vars_local[f'_r_{ctx_name}'] = dump_raw
+            vars_local[f"_r_{ctx_name}"] = dump_raw
             vars_local[ctx_name] = dump_raw
+
         if gh_dump is not None:
             gh_dump.append(dump_raw)
 
+        # Recurse into children contexts
         for child in node.children:
             child_vars, _ = self.execute_node(
                 child,
@@ -262,165 +286,165 @@ class ExecutionEngine:
             )
             vars_local.update(child_vars)
             inherited_for_children.update(child_vars)
-            nxt = child_vars.get('__GH_NEXT_CHILD_TEMPLATE__', None)
+            nxt = child_vars.get("__GH_NEXT_CHILD_TEMPLATE__", None)
             if nxt is not None:
                 ns_effective.child_template = nxt or None
 
+        # Optional template application (local -t or inherited -T)
         rendered = dump_raw
-        parent_child_tpl = getattr(ns_parent, 'child_template', None) if ns_parent else None
-        chosen_tpl = getattr(ns_effective, 'template', None) or parent_child_tpl
+        parent_child_tpl = getattr(ns_parent, "child_template", None) if ns_parent else None
+        chosen_tpl = getattr(ns_effective, "template", None) or parent_child_tpl
         if chosen_tpl:
             tpl_path = self._resolver.resolve(workspace, chosen_tpl)
             tpl_path = self._guard_ws(tpl_path)
             if not tpl_path.exists():
-                msg = f'template {tpl_path} not found'
+                msg = f"template {tpl_path} not found"
                 self._report.add_error(msg)
                 self._fatal(msg)
                 raise SystemExit(1)
-            with StageTimer(self._report, 'template'):
-                rendered = self._renderer.render_template(
-                    tpl_path, vars_local, ''.join(gh_dump or [])
-                )
+            with StageTimer(self._report, "template"):
+                rendered = self._renderer.render_template(tpl_path, vars_local, "".join(gh_dump or []))
 
         if ctx_name:
-            vars_local[f'_t_{ctx_name}'] = rendered
+            vars_local[f"_t_{ctx_name}"] = rendered
             vars_local[ctx_name] = rendered
 
+        # Output + optional AI pass
         final_out = rendered
         out_path: Optional[Path] = None
-        out_val = getattr(ns_effective, 'output', None)
-        if out_val not in (None, '') and str(out_val).lower() != 'none':
+        out_val = getattr(ns_effective, "output", None)
+        if out_val not in (None, "") and str(out_val).lower() != "none":
             out_path = self._resolver.resolve(workspace, out_val)
             out_path = self._guard_ws(out_path)
 
-        if getattr(ns_effective, 'ai', False):
+        if getattr(ns_effective, "ai", False):
+            # Ensure out_path exists for AI output
             if out_path is None:
-                tf = tempfile.NamedTemporaryFile(
-                    delete=False, dir=workspace, suffix='.ai.txt'
-                )
+                tf = tempfile.NamedTemporaryFile(delete=False, dir=workspace, suffix=".ai.txt")
                 tf.close()
                 out_path = Path(tf.name)
 
-            sys_prompt = ''
-            ai_sys = getattr(ns_effective, 'ai_system_prompt', None)
-            if ai_sys and str(ai_sys).lower() != 'none':
+            # Resolve optional system prompt and seeds
+            sys_prompt = ""
+            ai_sys = getattr(ns_effective, "ai_system_prompt", None)
+            if ai_sys and str(ai_sys).lower() != "none":
                 spath = self._resolver.resolve(workspace, ai_sys)
                 spath = self._guard_ws(spath)
                 if not spath.exists():
-                    msg = f'system prompt {spath} not found'
+                    msg = f"system prompt {spath} not found"
                     self._report.add_error(msg)
                     self._fatal(msg)
                     raise SystemExit(1)
-                sys_prompt = self._renderer.interpolate(
-                    spath.read_text(encoding='utf-8'), vars_local
-                )
+                sys_prompt = self._renderer.interpolate(spath.read_text(encoding="utf-8"), vars_local)
 
             seeds_path = None
-            ai_seeds = getattr(ns_effective, 'ai_seeds', None)
-            if ai_seeds and str(ai_seeds).lower() != 'none':
+            ai_seeds = getattr(ns_effective, "ai_seeds", None)
+            if ai_seeds and str(ai_seeds).lower() != "none":
                 seeds_path = self._resolver.resolve(workspace, ai_seeds)
                 seeds_path = self._guard_ws(seeds_path)
 
+            # Best-effort token metrics for the prompt before calling AI
             try:
-                messages = build_chat_messages(
-                    system_prompt=sys_prompt, seeds_path=seeds_path, user_prompt=rendered
-                )
-                model_name = getattr(ns_effective, 'ai_model', '') or ''
+                messages = build_chat_messages(system_prompt=sys_prompt, seeds_path=seeds_path, user_prompt=rendered)
+                model_name = getattr(ns_effective, "ai_model", "") or ""
                 ctx_window = self._resolve_model_ctx_window(model_name)
                 estimator = TokenBudgetEstimator()
-                est = estimator.estimate_messages_tokens(
-                    messages, model=model_name, context_window=ctx_window
-                )
+                est = estimator.estimate_messages_tokens(messages, model=model_name, context_window=ctx_window)
                 self._report.ai_tokens_in = est.tokens_in
                 self._report.ai_model_ctx_window = ctx_window
             except Exception:
                 pass
 
-            with StageTimer(self._report, 'ai'):
+            # AI call
+            with StageTimer(self._report, "ai"):
                 self._ai.run(
                     prompt=rendered,
                     out_path=out_path,
-                    model=getattr(ns_effective, 'ai_model', ''),
+                    model=getattr(ns_effective, "ai_model", ""),
                     system_prompt=sys_prompt,
-                    temperature=getattr(ns_effective, 'ai_temperature', None),
-                    top_p=getattr(ns_effective, 'ai_top_p', None),
-                    presence_penalty=getattr(ns_effective, 'ai_presence_penalty', None),
-                    frequency_penalty=getattr(ns_effective, 'ai_frequency_penalty', None),
+                    temperature=getattr(ns_effective, "ai_temperature", None),
+                    top_p=getattr(ns_effective, "ai_top_p", None),
+                    presence_penalty=getattr(ns_effective, "ai_presence_penalty", None),
+                    frequency_penalty=getattr(ns_effective, "ai_frequency_penalty", None),
                     seeds_path=seeds_path,
-                    max_tokens=getattr(ns_effective, 'ai_max_tokens', None),
-                    reasoning_effort=getattr(ns_effective, 'ai_reasoning_effort', None),
+                    max_tokens=getattr(ns_effective, "ai_max_tokens", None),
+                    reasoning_effort=getattr(ns_effective, "ai_reasoning_effort", None),
                 )
-            final_out = out_path.read_text(encoding='utf-8')
+            final_out = out_path.read_text(encoding="utf-8")
 
+            # Best-effort output token metrics
             try:
-                model_name = getattr(ns_effective, 'ai_model', '') or ''
+                model_name = getattr(ns_effective, "ai_model", "") or ""
                 estimator = TokenBudgetEstimator()
-                self._report.ai_tokens_out = estimator.estimate_text_tokens(
-                    final_out, model=model_name
-                )
+                self._report.ai_tokens_out = estimator.estimate_text_tokens(final_out, model=model_name)
             except Exception:
                 pass
 
+            # Optional sidecar metadata (finish_reason / usage) written by SDK
             try:
-                meta_path = out_path.with_suffix(out_path.suffix + '.meta.json')
+                meta_path = out_path.with_suffix(out_path.suffix + ".meta.json")
                 if meta_path.exists():
-                    meta = json.loads(meta_path.read_text(encoding='utf-8'))
-                    usage = meta.get('usage') or {}
-                    self._report.ai_finish_reason = meta.get('finish_reason')
-                    self._report.ai_usage_prompt = usage.get('prompt_tokens')
-                    self._report.ai_usage_completion = usage.get('completion_tokens')
-                    self._report.ai_usage_total = usage.get('total_tokens')
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    usage = meta.get("usage") or {}
+                    self._report.ai_finish_reason = meta.get("finish_reason")
+                    self._report.ai_usage_prompt = usage.get("prompt_tokens")
+                    self._report.ai_usage_completion = usage.get("completion_tokens")
+                    self._report.ai_usage_total = usage.get("total_tokens")
             except Exception:
                 pass
 
         if ctx_name:
-            vars_local[f'_ia_{ctx_name}'] = final_out
+            vars_local[f"_ia_{ctx_name}"] = final_out
             vars_local[ctx_name] = final_out
 
-        if out_path and (not getattr(ns_effective, 'ai', False)):
+        # Write non-AI outputs if requested
+        if out_path and (not getattr(ns_effective, "ai", False)):
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(final_out, encoding='utf-8')
-            self._log.info('✔ Output written → %s', out_path)
+            out_path.write_text(final_out, encoding="utf-8")
+            self._log.info("✔ Output written → %s", out_path)
 
-        force_stdout = bool(getattr(ns_effective, 'to_stdout', False))
-        auto_root_stdout = level == 0 and getattr(ns_effective, 'output', None) in (
-            None,
-            'none',
-        )
+        # STDOUT behavior (root/no -o, or -O duplication)
+        force_stdout = bool(getattr(ns_effective, "to_stdout", False))
+        auto_root_stdout = level == 0 and getattr(ns_effective, "output", None) in (None, "none")
         if force_stdout or (auto_root_stdout and (not force_stdout)):
             if not sys.stdout.isatty():
                 sys.stdout.write(final_out)
             else:
-                print(final_out, end='')
+                print(final_out, end="")
 
-        if level == 0 and final_out == '' and gh_dump:
-            final_out = ''.join(gh_dump)
+        # If root produced empty text but we collected a dump, return raw dump
+        if level == 0 and final_out == "" and gh_dump:
+            final_out = "".join(gh_dump)
+
         if level == 0 and gh_dump is not None:
-            vars_local['ghconcat_dump'] = ''.join(gh_dump)
+            vars_local["ghconcat_dump"] = "".join(gh_dump)
 
-        vars_local['__GH_NEXT_CHILD_TEMPLATE__'] = (
-            getattr(ns_effective, 'child_template', None) or ''
-        )
+        # Pass down child template default (if any)
+        vars_local["__GH_NEXT_CHILD_TEMPLATE__"] = getattr(ns_effective, "child_template", None) or ""
 
+        # Finish report and optionally emit JSON (stderr or file)
         if level == 0:
             self._report.finish()
-            report_target = getattr(ns_effective, 'report_json', None)
-            if report_target not in (None, '', 'none'):
+            report_target = getattr(ns_effective, "report_json", None)
+            if report_target not in (None, "", "none"):
                 target = Path(str(report_target))
-                if str(target) == '-':
+                if str(target) == "-":
                     print(self._report.to_json(), file=sys.stderr)
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(self._report.to_json() + '\n', encoding='utf-8')
-                    self._log.info('✔ Report written → %s', target)
+                    target.write_text(self._report.to_json() + "\n", encoding="utf-8")
+                    self._log.info("✔ Report written → %s", target)
 
         return (vars_local, final_out)
 
     def run(self, ctx: ContextConfig) -> str:
-        node = DirNode(name=ctx.name or None, tokens=self._tokens_from_context(ctx))
+        """Execute a single synthetic context built from a ContextConfig."""
+        argv = context_to_argv(ctx)  # canonical builder (dedup)
+        node = DirNode(name=ctx.name or None, tokens=argv)
         _vars, out = self.execute_node(node, None)
         return out
 
     def run_with_report(self, ctx: ContextConfig) -> tuple[str, ExecutionReport]:
+        """Run and return (output, report) for programmatic usage."""
         out = self.run(ctx)
         return (out, self._report)

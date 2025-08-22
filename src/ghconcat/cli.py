@@ -1,12 +1,4 @@
 from __future__ import annotations
-"""
-Command-line wiring for ghconcat.
-
-This module wires together parser, helpers and the runtime engine without
-exposing unnecessary global state. The refactor removes unused constants
-and variables while preserving all externally visible behavior expected by
-the test suite.
-"""
 
 import argparse
 import logging
@@ -20,84 +12,78 @@ from ghconcat.logging.factory import DefaultLoggerFactory
 from ghconcat.parsing.parser import _build_parser
 from ghconcat.parsing.directives import DirNode, DirectiveParser
 from ghconcat.parsing.tokenizer import DirectiveTokenizer
-from ghconcat.runtime.container import EngineBuilder, build_default_engine_config
 from ghconcat.runtime.sdk import _call_openai, _perform_upgrade
-from ghconcat.plugins.registry import apply_policy_set, get_classifier
 from ghconcat.processing.input_classifier import DefaultInputClassifier
 from ghconcat.core.interfaces.classifier import InputClassifierProtocol
+from ghconcat.plugins.registry import apply_policy_set, get_classifier
 from ghconcat.logging.helpers import get_logger
+from ghconcat.runtime.wiring import build_engine_config, build_engine
+from ghconcat.runtime.helpers import NamespaceMerger
+from ghconcat.utils.imports import load_object_from_ref  # ← unified dynamic import
 
-logger = get_logger("ghconcat")
 
-# Global caches (same semantics as before)
+logger = get_logger('ghconcat')
+
 _SEEN_FILES: set[Path] = set()
 _WORKSPACES_SEEN: set[Path] = set()
 _GIT_CLONES: Dict[Tuple[str, str | None], Path] = {}
 
 
 def _configure_logging(enable_json: bool) -> None:
-    prev = getattr(_configure_logging, "_configured_mode", None)
+    """Configure process-wide logging once, either JSON or plain text."""
+    prev = getattr(_configure_logging, '_configured_mode', None)
     if prev is not None and prev == bool(enable_json):
         return
     factory = DefaultLoggerFactory(json_logs=enable_json, level=logging.INFO)
-    lg = factory.get_logger("ghconcat")
+    lg = factory.get_logger('ghconcat')
     global logger
     logger = lg
-    setattr(_configure_logging, "_configured_mode", bool(enable_json))
+    setattr(_configure_logging, '_configured_mode', bool(enable_json))
 
 
 def _fatal(msg: str, code: int = 1) -> None:
+    """Exit the process with a logged error."""
     logger.error(msg)
     sys.exit(code)
 
 
-def _load_object_from_ref(ref: str) -> Any:
-    module_name, sep, obj_name = (ref or "").partition(":")
-    if not module_name or not sep or (not obj_name):
-        raise ImportError(f"Invalid reference '{ref}'. Expected 'module.path:ClassName'.")
-    module = __import__(module_name, fromlist=[obj_name])
-    return getattr(module, obj_name)
-
-
 def _make_classifier(ns: argparse.Namespace) -> InputClassifierProtocol:
-    ref = getattr(ns, "classifier_ref", None) or os.getenv("GHCONCAT_CLASSIFIER") or ""
-    ref = (ref or "").strip()
-    if ref and ref.lower() != "none":
-        if ref.startswith("plugin:"):
-            name = ref.split(":", 1)[1].strip()
+    """Build the input classifier according to CLI flags and plugins.
+
+    Resolution order:
+        1) --classifier / GHCONCAT_CLASSIFIER
+           - 'plugin:<name>' uses registry factories
+           - 'module.path:ClassName' uses dynamic import
+           - 'none' → default classifier
+        2) Policy set preset (--classifier-policies), default 'standard'
+    """
+    ref = getattr(ns, 'classifier_ref', None) or os.getenv('GHCONCAT_CLASSIFIER') or ''
+    ref = (ref or '').strip()
+    if ref and ref.lower() != 'none':
+        if ref.startswith('plugin:'):
+            name = ref.split(':', 1)[1].strip()
             factory = get_classifier(name)
             if factory is None:
-                logger.warning(
-                    "⚠  unknown classifier plugin %r – falling back to DefaultInputClassifier",
-                    name,
-                )
+                logger.warning('⚠  unknown classifier plugin %r – falling back to DefaultInputClassifier', name)
                 classifier: InputClassifierProtocol = DefaultInputClassifier()
             else:
                 classifier = factory()
         else:
             try:
-                cls = _load_object_from_ref(ref)
+                cls = load_object_from_ref(ref)  # ← unified loader
                 classifier = cls()
             except Exception as exc:
-                logger.warning(
-                    "⚠  failed to load classifier %r: %s  → falling back to DefaultInputClassifier",
-                    ref,
-                    exc,
-                )
+                logger.warning('⚠  failed to load classifier %r: %s  → falling back to DefaultInputClassifier', ref, exc)
                 classifier = DefaultInputClassifier()
     else:
         classifier = DefaultInputClassifier()
 
-    preset = (getattr(ns, "classifier_policies", "standard") or "standard").lower()
-    if preset != "none":
+    preset = (getattr(ns, 'classifier_policies', 'standard') or 'standard').lower()
+    if preset != 'none':
         try:
             classifier = apply_policy_set(preset, classifier)
         except Exception as exc:
-            logger.warning(
-                "⚠  failed to apply policy set %r: %s; continuing without policies",
-                preset,
-                exc,
-            )
+            logger.warning('⚠  failed to apply policy set %r: %s; continuing without policies', preset, exc)
     return classifier
 
 
@@ -111,38 +97,32 @@ def _execute_node(
     inherited_vars: Optional[Dict[str, str]] = None,
     gh_dump: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, str], str]:
-    # NOTE: tests may monkeypatch `_call_openai` off the ghconcat module.
-    _call_fn = _call_openai if "ghconcat" not in sys.modules else getattr(sys.modules["ghconcat"], "_call_openai")
+    """Execute a directive node and return (vars, rendered_output)."""
+    # Allow test-time monkeypatch via 'ghconcat' top-level module.
+    _call_fn = _call_openai if 'ghconcat' not in sys.modules else getattr(sys.modules['ghconcat'], '_call_openai')
 
-    # Build engine through the centralized, behavior-identical helper.
-    cfg = build_default_engine_config(
+    # Optional custom URL policy loader.
+    url_policy_ref = getattr(ns_parent or node, 'url_policy_ref', None)
+    policy_loader = None
+    if isinstance(url_policy_ref, str) and url_policy_ref and (url_policy_ref.lower() != 'none'):
+        try:
+            policy_cls = load_object_from_ref(url_policy_ref)  # ← unified loader
+            policy_loader = policy_cls
+        except Exception as exc:
+            logger.warning('⚠  failed to load URL policy %r: %s, continuing with default policy', url_policy_ref, exc)
+
+    cfg = build_engine_config(
         logger=logger,
         header_delim=HEADER_DELIM,
         seen_files=_SEEN_FILES,
         clones_cache=_GIT_CLONES,
         workspaces_seen=_WORKSPACES_SEEN,
-        fatal=lambda msg: _fatal(msg),
+        fatal_handler=lambda msg: _fatal(msg),
     )
-    builder = EngineBuilder.from_config(cfg)
+    engine = build_engine(cfg, call_openai=_call_fn, url_policy_cls=policy_loader)
 
-    # Optional custom URL policy loader resolution (kept intact).
-    url_policy_ref = getattr(ns_parent or node, "url_policy_ref", None)
-    policy_loader = None
-    if isinstance(url_policy_ref, str) and url_policy_ref and (url_policy_ref.lower() != "none"):
-        try:
-            policy_cls = _load_object_from_ref(url_policy_ref)
-            policy_loader = policy_cls
-        except Exception as exc:
-            logger.warning("⚠  failed to load URL policy %r: %s, continuing with default policy", url_policy_ref, exc)
-    if policy_loader is not None:
-        setattr(builder, "_url_policy_loader", policy_loader)
-
-    engine = builder.build(call_openai=_call_fn)
-
-    # Classifier preview to keep test-visible behavior
     tokens_preview = node.tokens or []
     ns_preview = _build_parser().parse_args(tokens_preview or [])
-    from ghconcat.runtime.helpers import NamespaceMerger  # local import to avoid drift
     NamespaceMerger.post_parse(ns_preview)
     engine._classifier = _make_classifier(ns_preview)
 
@@ -158,6 +138,7 @@ def _execute_node(
 
 
 def _purge_caches() -> None:
+    """Delete workspace caches unless --preserve-cache is set."""
     from ghconcat.io.cache_manager import CacheManager
 
     mgr = CacheManager(logger=logger)
@@ -165,9 +146,12 @@ def _purge_caches() -> None:
 
 
 class GhConcat:
+    """Top-level façade for command-style execution."""
+
     @staticmethod
     def run(argv: Sequence[str]) -> str:
-        json_logs = "--json-logs" in argv or os.getenv("GHCONCAT_JSON_LOGS") == "1"
+        """Run the tool with given argv-like sequence and return final text."""
+        json_logs = '--json-logs' in argv or os.getenv('GHCONCAT_JSON_LOGS') == '1'
         _configure_logging(json_logs)
 
         global _SEEN_FILES
@@ -177,15 +161,16 @@ class GhConcat:
         units: List[Tuple[Optional[Path], List[str]]] = []
         cli_remainder: List[str] = []
 
+        # Split argv by '-x FILE' directive chunks, preserving trailing flags.
         it = iter(argv)
         for tok in it:
-            if tok in ("-x", "--directives"):
+            if tok in ('-x', '--directives'):
                 try:
                     fpath = Path(next(it))
                 except StopIteration:
-                    _fatal("missing FILE after -x/--directives")
+                    _fatal('missing FILE after -x/--directives')
                 if not fpath.exists():
-                    _fatal(f"directive file {fpath} not found")
+                    _fatal(f'directive file {fpath} not found')
                 units.append((fpath, DirectiveTokenizer.inject_positional_add_paths(cli_remainder)))
                 cli_remainder = []
             else:
@@ -202,6 +187,7 @@ class GhConcat:
 
         for directive_path, extra_cli in units:
             _SEEN_FILES.clear()
+
             if directive_path:
                 root = dparser.parse(directive_path)
                 root.tokens.extend(extra_cli)
@@ -209,41 +195,44 @@ class GhConcat:
                 root = DirNode()
                 root.tokens.extend(extra_cli)
 
-            if "--upgrade" in root.tokens:
-                (_perform_upgrade if "ghconcat" not in sys.modules else getattr(sys.modules["ghconcat"], "_perform_upgrade"))()
+            if '--upgrade' in root.tokens:
+                (_perform_upgrade if 'ghconcat' not in sys.modules else getattr(sys.modules['ghconcat'], '_perform_upgrade'))()
 
+            # Pass url policy ref downstream as an attribute on the node.
             url_policy_ref = None
-            if "--url-policy" in root.tokens:
+            if '--url-policy' in root.tokens:
                 try:
-                    idx = root.tokens.index("--url-policy")
+                    idx = root.tokens.index('--url-policy')
                     url_policy_ref = root.tokens[idx + 1]
                 except Exception:
                     url_policy_ref = None
-            setattr(root, "url_policy_ref", url_policy_ref)
+            setattr(root, 'url_policy_ref', url_policy_ref)
 
             _, dump = _execute_node(root, None)
             outputs.append(dump)
 
-        if "--preserve-cache" not in argv:
+        if '--preserve-cache' not in argv:
             _purge_caches()
-        return "".join(outputs)
+
+        return ''.join(outputs)
 
 
 def main() -> NoReturn:
+    """Entry point for `python -m ghconcat`."""
     try:
         GhConcat.run(sys.argv[1:])
         raise SystemExit(0)
     except KeyboardInterrupt:
-        logger.error("Interrupted by user.")
+        logger.error('Interrupted by user.')
         raise SystemExit(130)
     except BrokenPipeError:
         raise SystemExit(0)
     except Exception as exc:
-        if os.getenv("DEBUG") == "1":
+        if os.getenv('DEBUG') == '1':
             raise
-        logger.error("Unexpected error: %s", exc)
+        logger.error('Unexpected error: %s', exc)
         raise SystemExit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

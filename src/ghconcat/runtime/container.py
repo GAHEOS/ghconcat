@@ -1,20 +1,6 @@
 from __future__ import annotations
-"""
-Runtime container: builds the execution engine with pluggable factories.
-
-This module keeps the dependency injection surface minimal and avoids
-cross-module type-only indirections. The design goal is to provide a single
-place to assemble the runtime (resolver, discovery, renderer and AI adapter)
-without exposing unnecessary complexity.
-
-Changes in this refactor:
-- Introduced `build_default_engine_config(...)` to centralize the assembly
-  of `EngineConfig` shared by CLI and EngineRunner, eliminating code duplication
-  while preserving behavior and test compatibility.
-"""
-
+'Runtime container: builds the execution engine with pluggable factories.\n\nThis module keeps the dependency injection surface minimal and avoids\ncross-module type-only indirections. The design goal is to provide a single\nplace to assemble the runtime (resolver, discovery, renderer and AI adapter)\nwithout exposing unnecessary complexity.\n\nNotes:\n    - `EngineConfig` is a compact, DI-friendly config passed into `EngineBuilder`.\n    - `EngineBuilder` produces a fully configured `ExecutionEngine`, used by\n      `runtime.wiring.build_engine(...)` and the CLI.\n'
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Set, Tuple
@@ -46,14 +32,6 @@ from ghconcat.processing.input_classifier import DefaultInputClassifier
 from ghconcat.rendering.execution import ExecutionEngine
 from ghconcat.rendering.template_engine import SingleBraceTemplateEngine
 
-# Added imports for the default-config helper (centralization)
-from ghconcat.processing.comment_rules import COMMENT_RULES
-from ghconcat.processing.line_ops import LineProcessingService
-from ghconcat.parsing.parser import _build_parser
-from ghconcat.processing.string_interpolator import StringInterpolator
-from ghconcat.runtime.helpers import TextReplacer, EnvExpander, NamespaceMerger
-from ghconcat.utils.net import ssl_context_for as _ssl_ctx_for
-
 
 @dataclass(frozen=True)
 class EngineConfig:
@@ -68,7 +46,6 @@ class EngineConfig:
     merge_ns: Callable[[object, object], object]
     expand_tokens: Callable[[list[str], Dict[str, str]], list[str]]
     parse_env_items: Callable[[Optional[list[str]]], Dict[str, str]]
-    interpolate: Callable[[str, Dict[str, str]], str]
     apply_replacements: Callable[[str, Optional[list[str]], Optional[list[str]]], str]
     slice_lines: Callable[[list[str], Optional[int], Optional[int], bool], list[str]]
     clean_lines: Callable[..., list[str]]
@@ -85,62 +62,6 @@ class EngineConfig:
     classifier: Optional[InputClassifierProtocol] = None
 
 
-def build_default_engine_config(
-    *,
-    logger: logging.Logger,
-    header_delim: str,
-    seen_files: Set[str],
-    clones_cache: Dict[Tuple[str, Optional[str]], Path],
-    workspaces_seen: Set[Path],
-    fatal: Callable[[str], None],
-) -> EngineConfig:
-    """Build a default EngineConfig instance.
-
-    This helper centralizes the exact, test-compatible setup shared by
-    both CLI and EngineRunner. Using this function removes duplicated code
-    while keeping behavior strictly unchanged.
-
-    Args:
-        logger: Logger instance to be used across components.
-        header_delim: Header delimiter string.
-        seen_files: Mutable set tracking already-bannered files.
-        clones_cache: Mutable mapping for deduplicated git clones.
-        workspaces_seen: Mutable set of workspace paths.
-        fatal: Fatal error handler (must raise SystemExit or exit process).
-
-    Returns:
-        EngineConfig ready to be passed into EngineBuilder.from_config(...).
-    """
-    # Keep the original line-1 regex and comment rules exactly the same
-    _line1_re = re.compile(r"^\s*#\s*line\s*1\d*\s*$")
-    _line_ops = LineProcessingService(
-        comment_rules=COMMENT_RULES, line1_re=_line1_re, logger=logger
-    )
-    replacer = TextReplacer(logger=logger)
-    envx = EnvExpander(logger=logger)
-    merger = NamespaceMerger(logger=logger)
-
-    return EngineConfig(
-        logger=logger,
-        header_delim=header_delim,
-        seen_files=seen_files,
-        clones_cache=clones_cache,
-        workspaces_seen=workspaces_seen,
-        ssl_ctx_provider=_ssl_ctx_for,
-        parser_factory=_build_parser,
-        post_parse=merger.post_parse,
-        merge_ns=merger.merge,
-        expand_tokens=envx.expand_tokens,
-        parse_env_items=envx.parse_items,
-        interpolate=lambda tpl, m: StringInterpolator().interpolate(tpl, m),
-        apply_replacements=replacer.apply,
-        slice_lines=_line_ops.slice_lines,
-        clean_lines=_line_ops.clean_lines,
-        fatal=fatal,
-        classifier=None,
-    )
-
-
 @dataclass
 class EngineBuilder:
     logger: logging.Logger
@@ -154,7 +75,6 @@ class EngineBuilder:
     merge_ns: Callable[[object, object], object]
     expand_tokens: Callable[[list[str], Dict[str, str]], list[str]]
     parse_env_items: Callable[[Optional[list[str]]], Dict[str, str]]
-    interpolate: Callable[[str, Dict[str, str]], str]
     apply_replacements: Callable[[str, Optional[list[str]], Optional[list[str]]], str]
     slice_lines: Callable[[list[str], Optional[int], Optional[int], bool], list[str]]
     clean_lines: Callable[..., list[str]]
@@ -171,7 +91,7 @@ class EngineBuilder:
     classifier: Optional[InputClassifierProtocol] = None
 
     @classmethod
-    def from_config(cls, cfg: EngineConfig) -> "EngineBuilder":
+    def from_config(cls, cfg: EngineConfig) -> 'EngineBuilder':
         return cls(
             logger=cfg.logger,
             header_delim=cfg.header_delim,
@@ -184,7 +104,6 @@ class EngineBuilder:
             merge_ns=cfg.merge_ns,
             expand_tokens=cfg.expand_tokens,
             parse_env_items=cfg.parse_env_items,
-            interpolate=cfg.interpolate,
             apply_replacements=cfg.apply_replacements,
             slice_lines=cfg.slice_lines,
             clean_lines=cfg.clean_lines,
@@ -197,10 +116,12 @@ class EngineBuilder:
         )
 
     def _clone_registry_for_run(self) -> ReaderRegistry:
+        """Return a suffix-only snapshot to preserve global mappings while isolating per-run registry state."""
         g = get_global_reader_registry(self.logger)
         return g.clone_suffix_only()
 
     def build(self, *, call_openai) -> ExecutionEngine:
+        """Assemble the ExecutionEngine with all DI components and factories."""
         reg = self._clone_registry_for_run()
         frs = FileReadingService(registry=reg, logger=self.logger)
 
@@ -210,20 +131,12 @@ class EngineBuilder:
 
         resolver: PathResolverProtocol = pr_factory()
         walker: WalkerProtocol = w_factory(
-            frs,
-            self.apply_replacements,
-            self.slice_lines,
-            self.clean_lines,
-            self.header_delim,
-            self.seen_files,
-            self.logger,
+            frs, self.apply_replacements, self.slice_lines, self.clean_lines, self.header_delim, self.seen_files, self.logger
         )
 
-        gm_factory = DefaultGitManagerFactory(
-            lambda ws: GitRepositoryManager(ws, logger=self.logger, clones_cache=self.clones_cache)
-        )
+        gm_factory = DefaultGitManagerFactory(lambda ws: GitRepositoryManager(ws, logger=self.logger, clones_cache=self.clones_cache))
 
-        policy_loader = getattr(self, "_url_policy_loader", None)
+        policy_loader = getattr(self, '_url_policy_loader', None)
 
         def _policy_instance():
             try:
@@ -232,16 +145,12 @@ class EngineBuilder:
                 return policy_loader() if callable(policy_loader) else policy_loader
             except Exception as exc:
                 self.logger.warning(
-                    "⚠  failed to instantiate custom URL policy %r: %s; using default",
-                    policy_loader,
-                    exc,
+                    '⚠  failed to instantiate custom URL policy %r: %s; using default', policy_loader, exc
                 )
                 return DefaultUrlAcceptPolicy()
 
         uf_factory = DefaultUrlFetcherFactory(
-            lambda ws: UrlFetcher(
-                ws, logger=self.logger, ssl_ctx_provider=self.ssl_ctx_provider, policy=_policy_instance()
-            )
+            lambda ws: UrlFetcher(ws, logger=self.logger, ssl_ctx_provider=self.ssl_ctx_provider, policy=_policy_instance())
         )
 
         if self.discovery_factory is not None:

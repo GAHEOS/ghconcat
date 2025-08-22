@@ -1,5 +1,6 @@
 from __future__ import annotations
-"""LanguageCleanerRegistry
+"""
+LanguageCleanerRegistry
 
 Provide pluggable, language-aware comment/docstring cleaners to decouple
 WalkerAppender from per-language conditionals.
@@ -11,14 +12,15 @@ pipeline (COMMENT_RULES via LineProcessingService).
 
 Built-ins:
     - Python: uses AST-based docstring stripper.
-    - Dart: uses robust comment stripper for // and /* ... */ with string safety.
-    - JS-family (js/ts/jsx/tsx): registered lazily using a generic C-like stripper.
+    - Dart: robust comment stripper for // and /* ... */ with string safety.
+    - JS-family and C-like languages: registered lazily using a generic
+      C-like stripper that handles // and /* ... */ and preserves strings.
 
 Design goals:
     * Backward compatibility for tests.
-    * Incremental adoption of language-specific cleaners.
+    * Reduce reliance on the regex pipeline when a language-aware cleaner
+      can be used safely.
 """
-
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Protocol
 
@@ -28,7 +30,7 @@ from ghconcat.processing.docstrip.c_like_docstrip import strip_c_like_comments
 
 
 class CleanerProtocol(Protocol):
-    def strip(self, source: str, *, filename: Optional[str] = None) -> str:  # pragma: no cover - protocol
+    def strip(self, source: str, *, filename: Optional[str] = None) -> str:
         ...
 
 
@@ -39,8 +41,6 @@ class _CleanerRegItem:
 
 
 class LanguageCleaner(CleanerProtocol):
-    """Small adapter to unify function-based strippers under a common protocol."""
-
     def __init__(self, fn: Callable[[str, Optional[str]], str]) -> None:
         self._fn = fn
 
@@ -49,68 +49,57 @@ class LanguageCleaner(CleanerProtocol):
 
 
 class LanguageCleanerRegistry:
-    """Registry that returns a cleaner per suffix, with lazy builders support."""
-
     def __init__(self) -> None:
         self._by_suffix: Dict[str, _CleanerRegItem] = {}
         self._lazy_builders: Dict[str, tuple[Callable[[], CleanerProtocol], int]] = {}
 
     @classmethod
-    def default(cls) -> "LanguageCleanerRegistry":
-        """Bootstrap a default registry with immediate and lazy mappings."""
+    def default(cls) -> 'LanguageCleanerRegistry':
+        """Build a default registry with lazy C-like cleaners for many languages."""
         reg = cls()
 
-        # Immediate (eager) registrations for guaranteed test behavior.
-        reg.register(
-            ".py",
-            LanguageCleaner(lambda s, fn=None: strip_comments_and_docstrings(s, language="py", filename=fn)),
-            priority=0,
+        # Precise language-specific cleaners
+        reg.register('.py', LanguageCleaner(lambda s, fn=None: strip_comments_and_docstrings(s, language='py', filename=fn)), priority=0)
+        reg.register('.dart', LanguageCleaner(lambda s, fn=None: strip_dart_comments(s)), priority=0)
+
+        # JS/TS family (existing behavior)
+        for suf in ('.js', '.jsx', '.ts', '.tsx'):
+            reg.register_lazy(suf, builder=lambda: LanguageCleaner(lambda s, fn=None: strip_c_like_comments(s)), priority=0)
+
+        # Broader C-like set to reduce regex fallback when --rm-comments is used.
+        c_like_suffixes = (
+            '.c', '.cc', '.cpp', '.cxx', '.h', '.hpp',
+            '.java', '.cs', '.go', '.rs',
+            '.php', '.swift', '.kt', '.kts', '.scala',
+            '.css', '.scss',
         )
-        reg.register(".dart", LanguageCleaner(lambda s, fn=None: strip_dart_comments(s)), priority=0)
-
-        # Lazy registrations for families where a single cleaner is enough (C-like).
-        for suf in (".js", ".jsx", ".ts", ".tsx"):
-            reg.register_lazy(
-                suf,
-                builder=lambda: LanguageCleaner(lambda s, fn=None: strip_c_like_comments(s)),
-                priority=0,
-            )
-
-        # (Room for more) e.g., ".go", ".java" could be added lazily as well:
-        # for suf in (".go", ".java"):
-        #     reg.register_lazy(suf, builder=lambda: LanguageCleaner(lambda s, fn=None: strip_c_like_comments(s)), priority=0)
+        for suf in c_like_suffixes:
+            reg.register_lazy(suf, builder=lambda: LanguageCleaner(lambda s, fn=None: strip_c_like_comments(s)), priority=0)
 
         return reg
 
     def register(self, suffix: str, cleaner: CleanerProtocol, *, priority: int = 0) -> None:
-        """Register a cleaner immediately for a given suffix."""
-        sufx = suffix if suffix.startswith(".") else f".{suffix}"
+        sufx = suffix if suffix.startswith('.') else f'.{suffix}'
         key = sufx.lower()
         prev = self._by_suffix.get(key)
         if prev is None or priority >= prev.priority:
             self._by_suffix[key] = _CleanerRegItem(cleaner=cleaner, priority=priority)
-        # If we register eagerly, drop any lazy builder for the same suffix.
         self._lazy_builders.pop(key, None)
 
     def register_lazy(self, suffix: str, *, builder: Callable[[], CleanerProtocol], priority: int = 0) -> None:
-        """Register a lazy builder for the suffix; constructed on first use."""
-        sufx = suffix if suffix.startswith(".") else f".{suffix}"
+        sufx = suffix if suffix.startswith('.') else f'.{suffix}'
         key = sufx.lower()
         self._lazy_builders[key] = (builder, priority)
 
     def for_suffix(self, suffix: str) -> Optional[CleanerProtocol]:
-        """Return a cleaner for the suffix, materializing a lazy builder if needed."""
-        key = (suffix or "").lower()
+        key = (suffix or '').lower()
         item = self._by_suffix.get(key)
         if item:
             return item.cleaner
-
         lazy = self._lazy_builders.get(key)
         if lazy:
             builder, prio = lazy
             cleaner = builder()
-            # Cache the materialized cleaner for subsequent calls.
             self.register(key, cleaner, priority=prio)
             return cleaner
-
         return None

@@ -1,5 +1,5 @@
-# src/ghconcat/io/readers.py
 from __future__ import annotations
+
 """
 Unified reader registry and built-in file readers.
 
@@ -8,6 +8,7 @@ This module exposes:
   * `DefaultTextReader`, `PdfFileReader`, `ExcelFileReader`: Built-in readers.
   * `get_global_reader_registry`: Process-wide registry (suffix-only snapshot).
 """
+
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -17,12 +18,12 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from ghconcat.io.pdf_reader import PdfTextExtractor
 from ghconcat.io.excel_reader import ExcelTsvExporter
 from ghconcat.core.models import ReaderHint
+from ghconcat.utils.suffixes import normalize_suffixes  # ← reuse shared helper
 
 
 class FileReader(ABC):
     @abstractmethod
     def read_lines(self, path: Path) -> List[str]:
-        """Return the file content split into lines (preserving newlines)."""
         raise NotImplementedError
 
 
@@ -44,23 +45,22 @@ class DefaultTextReader(FileReader):
 
 class PdfFileReader(FileReader):
     def __init__(
-        self,
-        *,
-        extractor: Optional[PdfTextExtractor] = None,
-        logger: Optional[logging.Logger] = None,
-        ocr_if_empty: bool = True,
-        dpi: int = 300,
+            self,
+            *,
+            extractor: Optional[PdfTextExtractor] = None,
+            logger: Optional[logging.Logger] = None,
+            ocr_if_empty: bool = True,
+            dpi: int = 300,
     ) -> None:
         self._log = logger or logging.getLogger('ghconcat.readers.pdf')
-        self._extractor = extractor or PdfTextExtractor(
-            logger=self._log, ocr_if_empty=ocr_if_empty, dpi=dpi
-        )
+        self._extractor = extractor or PdfTextExtractor(logger=self._log, ocr_if_empty=ocr_if_empty, dpi=dpi)
 
     def read_lines(self, path: Path) -> List[str]:
         text = self._extractor.extract_text(path)
         if not text:
             return []
-        return [ln + '\n' for ln in text.splitlines()]
+        return [ln + (''
+                      '') for ln in text.splitlines()]
 
 
 class ExcelFileReader(FileReader):
@@ -85,29 +85,19 @@ class _Rule:
 
 
 class ReaderRegistry:
-    """Registry mapping suffixes and ad-hoc rules to readers.
-
-    Performance note:
-        `read_lines_ex` is a hot path when many files are scanned. We keep a
-        cached, priority-sorted view of rule candidates and invalidate it on
-        any mutation (register / register_rule / push / pop).
-    """
-
     def __init__(self, default_reader: Optional[FileReader] = None) -> None:
         self._map: Dict[str, FileReader] = {}
         self._rules: List[_Rule] = []
         self._default: FileReader = default_reader or DefaultTextReader()
         self._stack: List[Tuple[Dict[str, FileReader], List[_Rule], FileReader]] = []
-        self._rules_sorted_cache: List[_Rule] | None = None  # cache of sorted rules
+        self._rules_sorted_cache: List[_Rule] | None = None
 
     def _invalidate_cache(self) -> None:
         self._rules_sorted_cache = None
 
     def _get_sorted_rules(self) -> List[_Rule]:
-        """Return rules sorted by priority (desc), cached."""
         if self._rules_sorted_cache is not None:
             return self._rules_sorted_cache
-        # Only rules that have at least one selector (suffixes/predicate/mimes)
         candidates = [r for r in self._rules if r.predicate is not None or r.suffixes or r.mimes]
         self._rules_sorted_cache = sorted(candidates, key=lambda r: r.priority, reverse=True)
         return self._rules_sorted_cache
@@ -122,10 +112,14 @@ class ReaderRegistry:
         self._invalidate_cache()
 
     def register(self, suffixes: Sequence[str], reader: FileReader) -> None:
-        norm: tuple[str, ...] = tuple(((s if s.startswith('.') else f'.{s}').lower() for s in suffixes))
+        """Register a reader for given suffixes (case-insensitive).
+
+        We normalize with `normalize_suffixes` and then lower-case to preserve
+        the previous behavior of case-insensitive matching.
+        """
+        norm = [s.lower() for s in normalize_suffixes(suffixes)]
         for key in norm:
             self._map[key] = reader
-        # Does not affect rules; no need to invalidate _rules cache.
 
     def for_suffix(self, suffix: str) -> FileReader:
         return self._map.get(suffix.lower(), self._default)
@@ -134,7 +128,6 @@ class ReaderRegistry:
         return self.read_lines_ex(path, hint=None)
 
     def read_lines_ex(self, path: Path, hint: Optional[ReaderHint] = None) -> List[str]:
-        # Try ad-hoc rules first (cached priority ordering).
         for rule in self._get_sorted_rules():
             if rule.suffixes and path.suffix.lower() not in rule.suffixes:
                 continue
@@ -143,7 +136,6 @@ class ReaderRegistry:
             if rule.predicate and (not rule.predicate(path)):
                 continue
             return rule.reader.read_lines(path)
-        # Fall back to suffix mapping.
         return self.for_suffix(path.suffix).read_lines(path)
 
     @property
@@ -154,29 +146,22 @@ class ReaderRegistry:
         self._default = reader
 
     def register_rule(
-        self,
-        *,
-        reader: FileReader,
-        priority: int = 0,
-        suffixes: Optional[Sequence[str]] = None,
-        predicate: Optional[Callable[[Path], bool]] = None,
-        mimes: Optional[Sequence[str]] = None,
+            self,
+            *,
+            reader: FileReader,
+            priority: int = 0,
+            suffixes: Optional[Sequence[str]] = None,
+            predicate: Optional[Callable[[Path], bool]] = None,
+            mimes: Optional[Sequence[str]] = None,
     ) -> None:
+        """Register an advanced rule with optional suffix/mime filters."""
         norm_suffixes: Optional[tuple[str, ...]] = None
         if suffixes:
-            norm_suffixes = tuple(((s if s.startswith('.') else f'.{s}').lower() for s in suffixes))
+            norm_suffixes = tuple(s.lower() for s in normalize_suffixes(suffixes))
         norm_mimes: Optional[tuple[str, ...]] = tuple(mimes) if mimes else None
         self._rules.append(
-            _Rule(reader=reader, priority=priority, suffixes=norm_suffixes, predicate=predicate, mimes=norm_mimes)
-        )
+            _Rule(reader=reader, priority=priority, suffixes=norm_suffixes, predicate=predicate, mimes=norm_mimes))
         self._invalidate_cache()
-
-    def register_temp(self, suffixes: Sequence[str], reader: FileReader) -> None:
-        self.push()
-        self.register(suffixes, reader)
-
-    def restore(self) -> None:
-        self.pop()
 
     def snapshot_suffix_mappings(self) -> Tuple[Dict[str, FileReader], FileReader]:
         return (dict(self._map), self._default)
